@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pip install -r requirements.txt)",
+      "Bash(python -c \"from rlgym_ppo import Learner; help\\(Learner.__init__\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(python -c \"from rlgym.rocket_league.done_conditions import GoalCondition, NoTouchTimeoutCondition, TimeoutCondition, AnyCondition; print\\('done_conditions OK'\\)\")",
+      "Bash(python -c \"from rlgym.rocket_league.reward_functions import CombinedReward, GoalReward; print\\('reward_functions OK'\\)\")",
+      "Bash(python -c \"from rlgym.rocket_league.sim import RocketSimEngine; print\\('sim OK'\\)\")",
+      "Bash(python -c \"from rlgym.rocket_league.state_mutators import MutatorSequence, FixedTeamSizeMutator, KickoffMutator; print\\('state_mutators OK'\\)\")",
+      "Bash(python -c \"from rlgym_ppo.util import RLGymV2GymWrapper; print\\('RLGymV2GymWrapper OK'\\)\")",
+      "Bash(python -c \"from Observation import PartialInfoObs; print\\('Observation.PartialInfoObs OK'\\)\")",
+      "Bash(python -c \"from Actions import HumanlikeAction; print\\('OK'\\)\")"
+    ]
+  }
+}

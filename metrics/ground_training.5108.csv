@@ -1,0 +1,1 @@
+run_label,episode_id,episode_length_steps,avg_dist_to_ball,avg_vel_toward_ball,air_time_fraction,avg_teammate_pairwise_dist,boost_stddev_teammates,overcommit_rate,simultaneous_air_rate

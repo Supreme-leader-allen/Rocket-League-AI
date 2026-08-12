@@ -1,0 +1,5 @@
+rlgym==2.0.1
+rlgym-ppo==1.3.13
+rocketsim==2.2.1
+torch==2.13.0
+numpy==1.26.4
