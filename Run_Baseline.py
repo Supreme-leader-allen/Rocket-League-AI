@@ -13,14 +13,25 @@ things already confirmed working in train_ground.py.
 Run with:
     python run_baseline.py --episodes 200
 
-Verify before trusting the output:
-- RLGymV2GymWrapper's exact reset()/step() signature. This assumes a
-  gym-like reset() -> obs (or (obs, info)) and step(actions) ->
-  (obs, reward, terminated, truncated, info), which is the standard
-  Gymnasium convention rlgym_ppo's wrapper is built to match, but wasn't
-  directly confirmed against source. If reset()/step() return something
-  else in your installed version, adjust the loop below accordingly --
-  the error message on first run will make it obvious what's mismatched.
+Verified against rlgym_ppo.util.rlgym_v2_gym_wrapper.RLGymV2GymWrapper's actual
+source (it does NOT follow the agent-ID-dict-keyed Gymnasium multi-agent
+convention this originally assumed):
+- reset() returns a plain np.ndarray of shape (n_agents, obs_dim) -- not a
+  dict, not a (obs, info) tuple. There is no per-agent key at all; agent
+  identity is only recoverable via the wrapper's internal agent_map (row
+  index -> AgentID), which this script doesn't need since it just fires
+  random actions at every row.
+- action_space is a single shared gym.spaces.Discrete attribute (all
+  agents share one action space in this project), not a per-agent
+  callable -- env.action_space(agent) raised TypeError: 'Discrete' object
+  is not callable, confirmed by running it.
+- step(actions) takes actions as a plain (n_agents, 1) array indexed by
+  row position (matching agent_map order from the last reset()), not an
+  AgentID-keyed dict -- confirmed against the wrapper's step() source,
+  which does `for i in range(len(actions)): ... action_dict[agent_map[i]]
+  = actions[i]`. It returns (obs, rews, done, truncated, info) where rews
+  is a plain list and done/truncated are already-aggregated bools (the
+  wrapper ORs across all agents internally), not per-agent dicts.
 """
 
 import argparse
@@ -35,30 +46,21 @@ def run(n_episodes: int) -> None:
     # only the run_label/csv_path differ, via build_rlgym_v2_env's
     # parameters (see train_ground.py's docstring on why those are
     # parameterized rather than hardcoded).
-    env = build_rlgym_v2_env(run_label="baseline_random", csv_path="metrics/baseline_random.csv")
+    env = build_rlgym_v2_env(
+        run_label="baseline_random",
+        csv_path="metrics/baseline_random.csv",
+        fitness_csv_path="metrics/baseline_random_fitness.csv",
+    )
+    n_actions = env.action_space.n
 
     for ep in range(n_episodes):
-        reset_result = env.reset()
-        obs = reset_result[0] if isinstance(reset_result, tuple) else reset_result
-        agents = list(obs.keys())
+        obs = env.reset()  # np.ndarray, shape (n_agents, obs_dim)
+        n_agents = obs.shape[0]
 
         terminated = truncated = False
         while not (terminated or truncated):
-            actions = {}
-            for agent in agents:
-                action_space = env.action_space(agent)
-                # Discrete LookupTableAction space -- sample a random valid index.
-                # If action_space exposes .sample() (Gymnasium Discrete/Box),
-                # prefer that; fall back to randint over its size otherwise.
-                if hasattr(action_space, "sample"):
-                    actions[agent] = action_space.sample()
-                else:
-                    actions[agent] = np.random.randint(action_space)
-
-            step_result = env.step(actions)
-            obs, reward, terminated_d, truncated_d, info = step_result
-            terminated = all(terminated_d.values()) if isinstance(terminated_d, dict) else terminated_d
-            truncated = all(truncated_d.values()) if isinstance(truncated_d, dict) else truncated_d
+            actions = np.random.randint(0, n_actions, size=(n_agents, 1))
+            obs, reward, terminated, truncated, info = env.step(actions)
 
         if (ep + 1) % 20 == 0:
             print(f"baseline: {ep + 1}/{n_episodes} episodes")

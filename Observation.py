@@ -26,9 +26,28 @@ Cost note: this does one shallow-ish copy + mutation of the relevant car
 physics per acting agent per step (8 agents in a 4v4), which is more
 work than DefaultObs alone. Fine for getting training running; worth
 profiling before you scale up n_proc a lot.
+
+Lucy-SKG-style auxiliary abstraction (see auxiliary.py): if the
+AUX_ENCODER_CHECKPOINT environment variable is set, PartialInfoObs loads
+a trained StateRepresentationNet encoder and concatenates its output
+onto every observation. Unset (the default), behavior is identical to
+before this feature existed -- nothing changes unless you've actually
+trained an encoder via train_auxiliary_encoder.py. When enabled,
+get_obs_space's reported size grows by ENCODED_DIM (16) accordingly,
+which matters because rlgym_ppo sizes its policy network's input layer
+from get_obs_space -- if this reported size and what build_obs actually
+returns ever disagree, you'll get a shape-mismatch error immediately on
+startup rather than something subtle later.
+
+Also writes each agent's raw (pre-concatenation) observation into
+shared_info["aux_obs"][agent] every step, which metrics.py's
+AuxiliaryDataLogger reads to build training data for the encoder. The
+raw, not the enriched, observation is logged deliberately -- training
+the encoder on its own already-encoded output would be circular.
 """
 
 import copy
+import os
 from typing import List, Dict, Any
 
 import numpy as np
@@ -41,6 +60,8 @@ FOV_HALF_ANGLE_DEG = 55.0     # ~110 degree horizontal cone -- rough stand-in fo
 NOISE_STD_UU = 60.0           # gaussian position noise (uu) applied to cars in view but far away
 NOISE_START_DIST_UU = 3000.0  # noise ramps in past this distance; nothing added for close-range cars
 MAX_STALENESS_STEPS = 45      # ~3s at 15 decisions/sec before a fully-occluded car is zeroed out entirely
+
+AUX_ENCODER_CHECKPOINT = os.environ.get("AUX_ENCODER_CHECKPOINT") or None
 
 
 class PartialInfoObs(ObsBuilder[AgentID, np.ndarray, GameState, Any]):
@@ -58,9 +79,17 @@ class PartialInfoObs(ObsBuilder[AgentID, np.ndarray, GameState, Any]):
         )
         # memory[agent][other_agent] = (position, linear_velocity, staleness_steps)
         self._memory: Dict[AgentID, Dict[AgentID, Any]] = {}
+        # Lazily constructed on first build_obs call, once we know the raw
+        # observation size (needed to build the encoder's input layer).
+        self._aux_encoder = None
+        self._aux_encoder_load_attempted = False
 
     def get_obs_space(self, agent: AgentID):
-        return self._base.get_obs_space(agent)
+        space_type, size = self._base.get_obs_space(agent)
+        if AUX_ENCODER_CHECKPOINT:
+            from Auxiliary import ENCODED_DIM
+            size = size + ENCODED_DIM
+        return space_type, size
 
     def reset(self, agents: List[AgentID], initial_state: GameState, shared_info: Dict[str, Any]) -> None:
         self._base.reset(agents, initial_state, shared_info)
@@ -68,17 +97,46 @@ class PartialInfoObs(ObsBuilder[AgentID, np.ndarray, GameState, Any]):
 
     def build_obs(self, agents: List[AgentID], state: GameState, shared_info: Dict[str, Any]) -> Dict[AgentID, np.ndarray]:
         out = {}
+        aux_obs_log = shared_info.setdefault("aux_obs", {})
+
         for agent in agents:
             masked_state = self._masked_state_for(agent, state)
             # DefaultObs.build_obs takes a list of agents; give it just this
             # one so the doctored state only affects this agent's own obs.
-            out[agent] = self._base.build_obs([agent], masked_state, shared_info)[agent]
+            raw_obs = self._base.build_obs([agent], masked_state, shared_info)[agent]
+            aux_obs_log[agent] = raw_obs
+
+            encoder = self._get_aux_encoder(raw_obs.shape[0])
+            if encoder is not None:
+                encoded = encoder.encode(raw_obs)
+                out[agent] = np.concatenate([raw_obs, encoded])
+            else:
+                out[agent] = raw_obs
+
         return out
+
+    def _get_aux_encoder(self, obs_size: int):
+        if not AUX_ENCODER_CHECKPOINT or self._aux_encoder_load_attempted:
+            return self._aux_encoder
+        self._aux_encoder_load_attempted = True
+        from Auxiliary import AuxiliaryEncoder
+        try:
+            self._aux_encoder = AuxiliaryEncoder(AUX_ENCODER_CHECKPOINT, obs_size)
+        except Exception as e:
+            print(f"PartialInfoObs: failed to load AUX_ENCODER_CHECKPOINT="
+                  f"{AUX_ENCODER_CHECKPOINT!r} ({e}) -- continuing without it. "
+                  f"Check that obs_size ({obs_size}) matches what the checkpoint "
+                  f"was trained with (train_auxiliary_encoder.py's --data-dir).")
+            self._aux_encoder = None
+        return self._aux_encoder
 
     def _masked_state_for(self, agent: AgentID, state: GameState) -> GameState:
         acting_car = state.cars[agent]
         acting_physics = acting_car.physics if acting_car.is_orange else acting_car.inverted_physics
-        forward = acting_physics.forward  # readonly property on PhysicsObject, not a method -- confirmed via help(PhysicsObject)
+        # PhysicsObject.forward is a @property (rotation_mtx[:, 0]), not a
+        # method -- confirmed via source; calling it as forward() raised
+        # TypeError: 'numpy.ndarray' object is not callable.
+        forward = acting_physics.forward
         acting_pos = acting_physics.position
 
         masked_state = copy.deepcopy(state)

@@ -1,2 +1,0 @@
-run_label,episode_id,episode_length_steps,avg_dist_to_ball,avg_vel_toward_ball,air_time_fraction,avg_teammate_pairwise_dist,boost_stddev_teammates,overcommit_rate,simultaneous_air_rate
-model_a_ground,2,191,3097.846435546875,19.006452560424805,0.8167539267015707,3088.8076171875,3.2175879679519364,0.041884816753926704,0.9685863874345549

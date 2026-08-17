@@ -10,7 +10,11 @@
       "Bash(python -c \"from rlgym.rocket_league.state_mutators import MutatorSequence, FixedTeamSizeMutator, KickoffMutator; print\\('state_mutators OK'\\)\")",
       "Bash(python -c \"from rlgym_ppo.util import RLGymV2GymWrapper; print\\('RLGymV2GymWrapper OK'\\)\")",
       "Bash(python -c \"from Observation import PartialInfoObs; print\\('Observation.PartialInfoObs OK'\\)\")",
-      "Bash(python -c \"from Actions import HumanlikeAction; print\\('OK'\\)\")"
+      "Bash(python -c \"from Actions import HumanlikeAction; print\\('OK'\\)\")",
+      "Bash(python -m pip show rlgym-ppo)",
+      "Bash(timeout 90 python -c ' *)",
+      "Bash(python Train_Auxiliary_Encoder.py --epochs 2 --batch-size 64)",
+      "Bash(AUX_ENCODER_CHECKPOINT=checkpoints/auxiliary_encoder.pt python -c ' *)"
     ]
   }
 }
