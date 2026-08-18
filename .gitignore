@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Training output. A single checkpoint directory is ~174 MB.
+checkpoints/
+data/checkpoints/
+metrics/
+*.log
+
+# Benchmark.py scratch output
+.benchmark_tmp/
+
+.claude/settings.local.json
+.DS_Store
