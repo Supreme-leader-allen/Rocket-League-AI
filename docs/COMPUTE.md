@@ -9,6 +9,13 @@ optimizing anything for speed. The compute profile of this project is not what
 general reinforcement-learning intuition predicts, and the specific ways it
 differs are listed below.
 
+**Read `ISSUES.md` before spending anything.** This file tells you what a run
+costs; `ISSUES.md` tells you whether the run will produce a usable result. At
+current rates the whole training program is on the order of $10–20 of rented
+GPU time, so compute is not this project's binding constraint — runs that
+complete normally and turn out to be unusable are. Two of the entries there
+(P1) cause an entire run to train zero timesteps while reporting success.
+
 ## The one rule: measure, then estimate
 
 ```
@@ -69,23 +76,30 @@ dominates produces a single-digit end-to-end improvement. Check
 highest-value change in the repo. The fix is to shallow-copy and replace only
 the `physics` fields being masked, instead of deep-copying the whole state.
 
+Note that `ISSUES.md` P0 changes this calculation: the masking those deep copies
+feed is currently discarded for teammates entirely, so part of this cost buys
+nothing at all. Fix P0 first — it is a correctness bug, and its fix touches the
+same lines.
+
 **4. `ANNEAL_SECONDS` is wall-clock time within a single process.** In
 `Train_Ground.py`, `AnnealedCombinedReward` decays dense shaping over
 `ANNEAL_SECONDS = 2 * 60 * 60`, measured from process start. Two consequences:
 
 - On a run longer than two hours, shaping is at zero for most of training. The
   value is a placeholder — the file's own comment says so. Set it to something
-  proportional to the real run length.
-- Under checkpoint-resume training, the clock restarts from zero every session,
-  so the anneal never completes. On any platform with session limits (notebook
-  services, preemptible instances) the mechanism is effectively broken. The
-  correct fix is to anneal on `cumulative_timesteps` instead of wall clock.
+  proportional to the real run length before you start a long job.
+- Under checkpoint-resume training the clock restarts every session, so the
+  anneal never completes at all. That makes it a correctness bug rather than a
+  tuning question, and it is tracked in `ISSUES.md` (P3) with the reasoning for
+  why it matters to the research argument. Fix by annealing on
+  `cumulative_timesteps`.
 
 **5. `checkpoint_load_folder` defaults to the string `"latest"`, not `None`.**
 Omitting it does not mean "fresh start" — `Learner` scans for a prior run's
 checkpoint directory and silently resumes from it. `Train_Ground.py` already
 passes it explicitly for this reason; preserve that if you refactor. Symptom of
 getting it wrong: a "new" run that starts with a suspiciously competent policy.
+Also tracked in `ISSUES.md` (P3).
 
 **6. Peak device memory is about 3.2 GiB. Size for compute and vCPUs, not
 VRAM.** Measured at `ppo_minibatch_size=50_000`; halving the minibatch roughly
@@ -172,6 +186,14 @@ python Train_Ground.py 2>&1 | tee -a <persistent path>/train.log
 (`POPULATION_SIZE=4`, `N_PROC_PER_MEMBER=8`, sequential generations) are
 deliberately conservative; scale `N_PROC_PER_MEMBER` using the same saturation
 number from `Benchmark.py`, divided by how many members you run concurrently.
+
+**`Benchmark.py` does not measure the PBT cross-play tournament, and it is not
+free.** `Self_Play.evaluate_match` runs one batch-1 forward pass per agent per
+step on CPU — eight per step through a 7.9M-parameter network, for up to 4500
+steps per episode, across every pair of members every generation. This can
+exceed the cost of the training it is ranking. Budget for it separately from any
+estimate derived from `Benchmark.py`, or batch it and move it onto the training
+device first (`ISSUES.md` P2).
 
 ## What not to do
 

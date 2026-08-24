@@ -1,7 +1,7 @@
 """
 Measures this machine's actual training throughput and prints a concrete
 configuration recommendation. Run this BEFORE choosing hardware, sizing a
-cloud instance, or estimating how long a run will take -- see COMPUTE.md
+cloud instance, or estimating how long a run will take -- see docs/COMPUTE.md
 for why estimating from intuition goes wrong on this project specifically.
 
     python Benchmark.py              # full sweep, ~2-4 minutes
@@ -206,7 +206,7 @@ def pick_device():
         # rlgym_ppo's Learner resolves device="auto" to cuda-or-cpu and never
         # selects mps. We benchmark it anyway so you can see what the hardware
         # could do, but the real run will be on CPU unless you patch Learner.
-        return "mps", "Apple GPU (NOTE: rlgym_ppo will NOT use this -- see COMPUTE.md)"
+        return "mps", "Apple GPU (NOTE: rlgym_ppo will NOT use this -- see docs/COMPUTE.md)"
     return "cpu", "CPU only"
 
 
@@ -419,7 +419,7 @@ def main():
         print(f"    1. Lower exp_buffer_size (currently {cfg['exp_buffer_size']:,}). Dropping it")
         print(f"       to {cfg['ppo_batch_size']:,} cuts update cost {cfg['exp_buffer_size'] // cfg['ppo_batch_size']}x."
               f" This changes sample reuse, so it is a")
-        print(f"       training tradeoff, not a free win -- see COMPUTE.md.")
+        print(f"       training tradeoff, not a free win -- see docs/COMPUTE.md.")
         print(f"    2. A faster GPU. Do NOT buy for VRAM: peak use is {peak_gib:.1f} GiB.")
         print(f"    Optimizing the env / deepcopy first would be wasted work here.")
     else:

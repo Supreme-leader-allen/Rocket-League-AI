@@ -14,3 +14,9 @@ metrics/
 
 .claude/settings.local.json
 .DS_Store
+
+# Run_All.sh output (local runs)
+output/
+
+# Personal notes -- never committed
+*.local.md
