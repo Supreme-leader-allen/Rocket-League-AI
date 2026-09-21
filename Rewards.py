@@ -16,7 +16,6 @@ team-shared by construction, which is the credit-assignment mechanism
 itself, not something this file needs to implement.
 """
 
-import time
 from typing import List, Dict, Any, Sequence, Tuple
 
 import numpy as np
@@ -87,42 +86,65 @@ class VelocityBallToGoalReward(RewardFunction[AgentID, GameState, float]):
 class AnnealedCombinedReward(RewardFunction[AgentID, GameState, float]):
     """
     Combines (reward_fn, initial_weight, final_weight) triples and linearly
-    anneals each weight from initial to final over `anneal_seconds` of
-    wall-clock training time.
+    anneals each weight from initial to final over `anneal_timesteps` of
+    (estimated) cumulative environment timesteps.
 
-    Wall-clock rather than a global timestep counter is a deliberate choice:
-    rlgym_ppo runs many environment processes in parallel (n_proc), each
-    with its own copy of this reward function, so there's no cheap way for
-    one process to know the *global* timestep count without extra
-    plumbing (e.g. a multiprocessing.Value updated via a metrics_logger
-    callback). Wall-clock time is process-local, needs no synchronization,
-    and tracks training progress closely enough in practice since all
-    workers run continuously and roughly in step with each other. If you
-    later want exact timestep-based annealing, that shared-counter
-    approach is the correct upgrade -- this is the simple version to start
-    with.
+    Previously annealed over wall-clock time instead, measured from this
+    process's own start -- confirmed broken (docs/ISSUES.md P3): a fresh
+    process starts a fresh clock, so the anneal silently restarted from
+    zero on every checkpoint resume (never completing at all on any
+    session-limited platform) and, on any run longer than the hardcoded
+    anneal_seconds, left shaping stuck at zero for the remainder. Neither
+    failure is possible with a timestep-based budget, since
+    cumulative_timesteps is what checkpoint resume actually restores and
+    what timestep_limit is actually budgeted in.
+
+    Exact global cumulative_timesteps isn't directly available inside an
+    environment subprocess without forking rlgym_ppo internals to push it
+    in every step (same category of limitation as self_play.py's
+    FrozenPolicy) -- rlgym_ppo runs n_proc independent environment
+    processes and Learner's cumulative_timesteps lives only in the parent
+    process. What's tracked instead is an estimate:
+
+        estimated_cumulative = initial_timesteps + local_agent_steps * n_proc
+
+    `local_agent_steps` accumulates len(agents) every get_rewards() call
+    (confirmed against rlgym_ppo.batched_agents.batched_agent_manager.
+    BatchedAgentManager._collect_response's source: it counts
+    `n_collected = prev_n_agents` for a multi-agent env, i.e.
+    cumulative_timesteps advances by the AGENT count each step, not by
+    1 -- so a 4v4's 8 agents must be counted, not the env.step() call).
+    Multiplying by `n_proc` estimates the other processes' contributions,
+    assuming they advance at roughly the same rate, which is the same
+    "close enough in practice" approximation the wall-clock version made
+    explicitly, just no longer one that resets to zero on resume.
+    `initial_timesteps` recovers the actual resume point from the loaded
+    checkpoint (Train_Ground.py/Train_Aerial.py pass it in, read off the
+    checkpoint path's own digit-named folder -- the same technique
+    Pbt.py's and Train_Aerial.py's timestep_limit fixes use).
 
     Terms with initial_weight == final_weight (e.g. GoalReward, passed
     with no annealing) are just held constant.
     """
 
-    def __init__(self, weighted_rewards: Sequence[Tuple[RewardFunction, float, float]], anneal_seconds: float):
+    def __init__(self, weighted_rewards: Sequence[Tuple[RewardFunction, float, float]],
+                 anneal_timesteps: float, n_proc: int = 1, initial_timesteps: float = 0.0):
         super().__init__()
         self._entries = list(weighted_rewards)
-        self._anneal_seconds = anneal_seconds
-        self._start_time = None
+        self._anneal_timesteps = anneal_timesteps
+        self._n_proc = max(1, n_proc)
+        self._initial_timesteps = initial_timesteps
+        self._local_agent_steps = 0
 
     def reset(self, agents: List[AgentID], initial_state: GameState, shared_info: Dict[str, Any]) -> None:
-        if self._start_time is None:
-            self._start_time = time.time()
         for reward_fn, _, _ in self._entries:
             reward_fn.reset(agents, initial_state, shared_info)
 
     def _current_progress(self) -> float:
-        if self._anneal_seconds <= 0:
+        if self._anneal_timesteps <= 0:
             return 1.0
-        elapsed = time.time() - self._start_time
-        return min(1.0, elapsed / self._anneal_seconds)
+        estimated_cumulative = self._initial_timesteps + self._local_agent_steps * self._n_proc
+        return min(1.0, estimated_cumulative / self._anneal_timesteps)
 
     def get_rewards(self, agents: List[AgentID], state: GameState, is_terminated: Dict[AgentID, bool],
                      is_truncated: Dict[AgentID, bool], shared_info: Dict[str, Any]) -> Dict[AgentID, float]:
@@ -135,4 +157,5 @@ class AnnealedCombinedReward(RewardFunction[AgentID, GameState, float]):
             for agent in agents:
                 totals[agent] += weight * per_agent[agent]
 
+        self._local_agent_steps += len(agents)
         return totals

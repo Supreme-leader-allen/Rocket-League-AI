@@ -56,7 +56,14 @@ from rlgym.rocket_league.api import GameState
 from rlgym.rocket_league.obs_builders import DefaultObs
 from rlgym.rocket_league import common_values
 
-FOV_HALF_ANGLE_DEG = 55.0     # ~110 degree horizontal cone -- rough stand-in for a player's screen + attention
+# ~110 degree horizontal cone -- rough stand-in for a player's screen +
+# attention. Exposed as an env var (not just a literal) so an ablation
+# run can open it to 180 (nothing ever occluded) to test whether the
+# partial-information constraint itself matters -- see
+# experiments/03_full_info.sh. Only meaningful now that docs/ISSUES.md
+# P0 (the view cone frame mismatch) is actually fixed; before that fix
+# this ablation would have been indistinguishable from the P0 bug.
+FOV_HALF_ANGLE_DEG = float(os.environ.get("FOV_HALF_ANGLE_DEG", 55.0))
 NOISE_STD_UU = 60.0           # gaussian position noise (uu) applied to cars in view but far away
 NOISE_START_DIST_UU = 3000.0  # noise ramps in past this distance; nothing added for close-range cars
 MAX_STALENESS_STEPS = 45      # ~3s at 15 decisions/sec before a fully-occluded car is zeroed out entirely
@@ -65,7 +72,15 @@ AUX_ENCODER_CHECKPOINT = os.environ.get("AUX_ENCODER_CHECKPOINT") or None
 
 
 class PartialInfoObs(ObsBuilder[AgentID, np.ndarray, GameState, Any]):
-    def __init__(self, zero_padding: int = 3):
+    def __init__(self, zero_padding: int = 4):
+        # 4, not 3: DefaultObs's zero_padding is "max cars per team," and
+        # this project's fixed 4v4 needs exactly that (confirmed by direct
+        # execution -- 3 silently under-declares the observation size and
+        # crashes policy-network construction with a shape mismatch; see
+        # Train_Ground.py's comment and docs/ISSUES.md). Every call site
+        # already passes zero_padding=4 explicitly, so this default was
+        # never actually reached -- kept in sync anyway so the next place
+        # that constructs PartialInfoObs() bare doesn't inherit a landmine.
         super().__init__()
         self._base = DefaultObs(
             zero_padding=zero_padding,
@@ -123,16 +138,43 @@ class PartialInfoObs(ObsBuilder[AgentID, np.ndarray, GameState, Any]):
         try:
             self._aux_encoder = AuxiliaryEncoder(AUX_ENCODER_CHECKPOINT, obs_size)
         except Exception as e:
-            print(f"PartialInfoObs: failed to load AUX_ENCODER_CHECKPOINT="
-                  f"{AUX_ENCODER_CHECKPOINT!r} ({e}) -- continuing without it. "
-                  f"Check that obs_size ({obs_size}) matches what the checkpoint "
-                  f"was trained with (train_auxiliary_encoder.py's --data-dir).")
-            self._aux_encoder = None
+            # Let this propagate instead of falling back to None. This
+            # used to catch, warn, and continue with the un-augmented
+            # observation -- but get_obs_space() already unconditionally
+            # reports the ENCODED_DIM-larger size whenever
+            # AUX_ENCODER_CHECKPOINT is merely set (it can't know the
+            # load will fail), so a silent fallback here made build_obs
+            # return an observation smaller than what get_obs_space
+            # already promised rlgym_ppo for sizing the policy input
+            # layer. That produced exactly the delayed, confusing matmul
+            # shape error at the first forward pass -- with nothing in
+            # the message about the encoder -- that this module's own
+            # docstring claims can't happen. See docs/ISSUES.md P2.
+            raise RuntimeError(
+                f"PartialInfoObs: failed to load AUX_ENCODER_CHECKPOINT="
+                f"{AUX_ENCODER_CHECKPOINT!r} (obs_size={obs_size}). Check "
+                f"that obs_size matches what the checkpoint was trained "
+                f"with (Train_Auxiliary_Encoder.py's --data-dir)."
+            ) from e
         return self._aux_encoder
 
     def _masked_state_for(self, agent: AgentID, state: GameState) -> GameState:
         acting_car = state.cars[agent]
-        acting_physics = acting_car.physics if acting_car.is_orange else acting_car.inverted_physics
+        # Frame is selected ONCE, from the acting agent's team, and applied
+        # uniformly to every car -- matching DefaultObs._build_obs (which
+        # picks `inverted` once from the acting car and reuses it for every
+        # other car's _generate_car_obs call). Previously this picked a
+        # frame per car from that car's OWN team, which is the idiom
+        # Rewards.py uses (correct there, because car and ball always go
+        # through the same rule and the inversion is a proper rotation) but
+        # wrong here, because the observation frame must match DefaultObs's
+        # convention, not just be internally consistent. Confirmed broken
+        # by execution (see docs/ISSUES.md P0): teammate masking was a
+        # no-op (masked values were written to the object DefaultObs never
+        # reads), and the opponent view cone was inverted (forward taken
+        # from one frame, opponent position from another).
+        inverted = acting_car.is_orange
+        acting_physics = acting_car.inverted_physics if inverted else acting_car.physics
         # PhysicsObject.forward is a @property (rotation_mtx[:, 0]), not a
         # method -- confirmed via source; calling it as forward() raised
         # TypeError: 'numpy.ndarray' object is not callable.
@@ -146,7 +188,7 @@ class PartialInfoObs(ObsBuilder[AgentID, np.ndarray, GameState, Any]):
             if other_id == agent:
                 continue
 
-            other_physics = other_car.physics if other_car.is_orange else other_car.inverted_physics
+            other_physics = other_car.inverted_physics if inverted else other_car.physics
             to_other = other_physics.position - acting_pos
             dist = np.linalg.norm(to_other)
             if dist < 1e-6:
@@ -155,7 +197,7 @@ class PartialInfoObs(ObsBuilder[AgentID, np.ndarray, GameState, Any]):
             in_view = cos_angle >= np.cos(np.radians(FOV_HALF_ANGLE_DEG))
 
             masked_other = masked_state.cars[other_id]
-            masked_physics = masked_other.physics if masked_other.is_orange else masked_other.inverted_physics
+            masked_physics = masked_other.inverted_physics if inverted else masked_other.physics
 
             if in_view:
                 noise_scale = max(0.0, dist - NOISE_START_DIST_UU) / NOISE_START_DIST_UU

@@ -247,10 +247,23 @@ class FitnessTracker(RewardFunction[AgentID, GameState, float]):
                      is_truncated: Dict[AgentID, bool], shared_info: Dict[str, Any]) -> Dict[AgentID, float]:
         rewards = self.inner.get_rewards(agents, state, is_terminated, is_truncated, shared_info)
         if rewards:
-            # Team-shared reward (GoalReward) is identical across teammates,
-            # so averaging rather than summing keeps this a per-agent return
-            # rather than inflating it by team size.
-            self._episode_sum += float(np.mean(list(rewards.values())))
+            # GoalReward is antisymmetric across teams -- its source
+            # returns +1 to the scoring team's agents and -1 to the
+            # other team's, every step state.goal_scored is True.
+            # Averaging over ALL agents (both teams), as this used to
+            # do, sums to (4*(+1) + 4*(-1)) / 8 == 0 on every single
+            # step in a balanced 4v4 -- self-play mirrors one live
+            # policy onto both blue and orange, so "the tracked
+            # member's return" only means something if it's read off
+            # ONE team's agents, not averaged across both. Blue is the
+            # canonical choice (team_num == BLUE_TEAM); which team is
+            # arbitrary here since both are the same policy, but
+            # picking one consistently is what makes the number
+            # reflect actual scoring rather than being an identity.
+            # See docs/ISSUES.md P1.
+            tracked_team_rewards = [r for a, r in rewards.items() if not state.cars[a].is_orange]
+            if tracked_team_rewards:
+                self._episode_sum += float(np.mean(tracked_team_rewards))
             self._episode_steps += 1
             self._has_data = True
         return rewards

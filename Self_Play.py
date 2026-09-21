@@ -85,12 +85,32 @@ class CheckpointPool:
         self._pool_dir.mkdir(parents=True, exist_ok=True)
         self._max_checkpoints = max_checkpoints
         self._recent_bias = recent_bias
+        # Monotonic, never reused -- fixes a real collision: naming by
+        # len(list_checkpoints()) means that once the pool reaches
+        # max_checkpoints, each archive() adds one and prunes one, so the
+        # count stays constant and every subsequent archive() overwrote
+        # the SAME directory instead of adding a new opponent, silently
+        # freezing the pool. See docs/ISSUES.md P2. Seeded from any
+        # existing pool contents so a freshly constructed instance
+        # pointed at a non-empty pool_dir doesn't restart numbering at 0
+        # and collide with what's already there.
+        self._next_ckpt_id = self._infer_next_ckpt_id()
+
+    def _infer_next_ckpt_id(self) -> int:
+        ids = []
+        for p in self.list_checkpoints():
+            suffix = p.name[len("ckpt_"):]
+            if p.name.startswith("ckpt_") and suffix.isdigit():
+                ids.append(int(suffix))
+        return (max(ids) + 1) if ids else 0
 
     def archive(self, checkpoint_dir: str) -> None:
-        """Copy a Learner checkpoint directory into the pool, tagged by
-        timestamp, and prune old entries past max_checkpoints."""
+        """Copy a Learner checkpoint directory into the pool under a
+        monotonically increasing id, and prune old entries past
+        max_checkpoints."""
         src = Path(checkpoint_dir)
-        dest = self._pool_dir / f"ckpt_{len(self.list_checkpoints()):06d}"
+        dest = self._pool_dir / f"ckpt_{self._next_ckpt_id:06d}"
+        self._next_ckpt_id += 1
         shutil.copytree(src, dest, dirs_exist_ok=True)
         self._prune()
 
@@ -133,13 +153,47 @@ class FrozenPolicy:
         self.policy.eval()
 
     def act(self, obs, deterministic: bool = False) -> np.ndarray:
+        """Single-agent inference. evaluate_match no longer calls this
+        (see act_batch, and docs/ISSUES.md P2 on why) -- kept for any
+        other single-agent caller."""
+        return self.act_batch(np.asarray(obs)[None, :], deterministic=deterministic)
+
+    def act_batch(self, obs_batch: np.ndarray, deterministic: bool = False) -> np.ndarray:
+        """
+        obs_batch: (n_agents, obs_size). Returns an (n_agents,) array of
+        action indices from ONE forward pass, instead of one batch-1 call
+        per agent. DiscreteFF.get_output reshapes to (batch, n_actions)
+        regardless of input batch size (confirmed via source:
+        `probs.view(-1, self.n_actions)`), so this produces the same
+        per-agent distribution as calling act() once per agent -- just
+        without the redundant per-agent Python/torch call overhead
+        (previously 8 batch-1 CPU forward passes per step in
+        evaluate_match; see docs/ISSUES.md P2).
+
+        deterministic=True only supported for batch size 1: DiscreteFF.
+        get_action's deterministic branch does
+        `probs.cpu().numpy().argmax()` with no axis argument (confirmed
+        by reading its source), which argmaxes over the FLATTENED
+        (batch, n_actions) array -- a single global index, not one per
+        row. That's an upstream rlgym_ppo limitation for batched greedy
+        selection, not something to work around here; evaluate_match
+        uses deterministic=False (the default), same as before.
+        """
+        if deterministic and obs_batch.shape[0] > 1:
+            raise NotImplementedError(
+                "FrozenPolicy.act_batch(deterministic=True) is not meaningful "
+                "for batch size > 1 -- DiscreteFF.get_action's deterministic "
+                "branch argmaxes over the flattened batch, not per row "
+                "(rlgym_ppo 1.3.13's DiscreteFF.get_action source)."
+            )
         with torch.no_grad():
-            action, _ = self.policy.get_action(obs, deterministic=deterministic)
-        # get_action returns a flattened torch tensor of shape (1,) when
-        # stochastic, or a bare numpy scalar from .argmax() when
-        # deterministic -- normalize both to what HumanlikeAction.
-        # parse_actions expects per agent: a (1,) int array (confirmed by
-        # running parse_actions -- see actions.py's module docstring).
+            action, _ = self.policy.get_action(obs_batch, deterministic=deterministic)
+        # get_action returns a flattened torch tensor of shape (batch,)
+        # when stochastic, or a bare numpy scalar from .argmax() when
+        # deterministic (batch size 1 only, per above) -- normalize both
+        # to what HumanlikeAction.parse_actions expects per agent: an int
+        # array (confirmed by running parse_actions -- see actions.py's
+        # module docstring).
         if torch.is_tensor(action):
             action = action.cpu().numpy()
         return np.atleast_1d(action).astype(np.int32)
@@ -199,8 +253,17 @@ def build_eval_env():
     )
 
 
+def _resolve_device() -> str:
+    """Same resolution rlgym_ppo.Learner uses for device="auto" (confirmed
+    against its source): CUDA if available, else CPU -- never MPS, even
+    on Apple silicon (see docs/COMPUTE.md). evaluate_match defaults to
+    this instead of hardcoding "cpu", so the PBT tournament runs on
+    whatever device training actually used rather than always CPU."""
+    return "cuda:0" if torch.cuda.is_available() else "cpu"
+
+
 def evaluate_match(blue_checkpoint_dir: str, orange_checkpoint_dir: str, n_episodes: int = 10,
-                    policy_layer_sizes=(2048, 2048, 1024, 1024)) -> float:
+                    policy_layer_sizes=(2048, 2048, 1024, 1024), device: Optional[str] = None) -> float:
     """
     Plays n_episodes of 4v4 with blue controlled by a frozen policy
     loaded from blue_checkpoint_dir and orange from orange_checkpoint_dir.
@@ -220,29 +283,47 @@ def evaluate_match(blue_checkpoint_dir: str, orange_checkpoint_dir: str, n_episo
     actions/rewards are all AgentID-keyed dicts and team_of_agent below
     is read directly off env.state.cars[agent].is_orange -- no guessing
     required, confirmed by running a match end to end.
+
+    Each step, all of blue's agents are batched into ONE forward pass and
+    all of orange's into another -- 2 forward passes per step instead of
+    8 batch-1 passes (see FrozenPolicy.act_batch and docs/ISSUES.md P2).
+    `device` defaults to _resolve_device()'s result (matching Learner's
+    own "auto" resolution) rather than always CPU -- see docs/COMPUTE.md
+    on why this tournament is not free and should run on the training
+    device when one is available.
     """
+    if device is None:
+        device = _resolve_device()
+
     env = build_eval_env()
     obs = env.reset()
 
     obs_size = len(next(iter(obs.values())))
     action_size = list(env.action_spaces.values())[0][1]
 
-    policy_blue = FrozenPolicy(blue_checkpoint_dir, policy_layer_sizes, obs_size, action_size)
-    policy_orange = FrozenPolicy(orange_checkpoint_dir, policy_layer_sizes, obs_size, action_size)
+    policy_blue = FrozenPolicy(blue_checkpoint_dir, policy_layer_sizes, obs_size, action_size, device=device)
+    policy_orange = FrozenPolicy(orange_checkpoint_dir, policy_layer_sizes, obs_size, action_size, device=device)
 
     wins = 0.0
     for ep in range(n_episodes):
         if ep > 0:
             obs = env.reset()
         team_of_agent = _infer_teams(env, obs)
+        blue_agents = [a for a in obs if team_of_agent[a] == "blue"]
+        orange_agents = [a for a in obs if team_of_agent[a] == "orange"]
 
         terminated = truncated = False
         winner = None
         while not (terminated or truncated):
             actions = {}
-            for agent in obs:
-                policy = policy_blue if team_of_agent[agent] == "blue" else policy_orange
-                actions[agent] = policy.act(obs[agent])
+            if blue_agents:
+                blue_batch = np.stack([obs[a] for a in blue_agents])
+                for agent, act_idx in zip(blue_agents, policy_blue.act_batch(blue_batch)):
+                    actions[agent] = np.array([act_idx], dtype=np.int32)
+            if orange_agents:
+                orange_batch = np.stack([obs[a] for a in orange_agents])
+                for agent, act_idx in zip(orange_agents, policy_orange.act_batch(orange_batch)):
+                    actions[agent] = np.array([act_idx], dtype=np.int32)
 
             obs, reward, terminated_d, truncated_d = env.step(actions)
             terminated = all(terminated_d.values())

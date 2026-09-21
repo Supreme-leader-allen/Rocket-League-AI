@@ -81,18 +81,26 @@ feed is currently discarded for teammates entirely, so part of this cost buys
 nothing at all. Fix P0 first — it is a correctness bug, and its fix touches the
 same lines.
 
-**4. `ANNEAL_SECONDS` is wall-clock time within a single process.** In
-`Train_Ground.py`, `AnnealedCombinedReward` decays dense shaping over
-`ANNEAL_SECONDS = 2 * 60 * 60`, measured from process start. Two consequences:
+**4. `ANNEAL_TIMESTEPS` is now (estimated) cumulative timesteps, not
+wall-clock time — this was fixed (`ISSUES.md` P3), but the estimate has a
+scale to be aware of.** `Train_Ground.py`'s `AnnealedCombinedReward` used to
+decay dense shaping over `ANNEAL_SECONDS = 2 * 60 * 60`, measured from
+process start — a real correctness bug (shaping stuck at zero on any run
+past two hours, and the clock silently restarting on every checkpoint
+resume so the anneal never completed on session-limited platforms). It's
+fixed now: `ANNEAL_TIMESTEPS` (default 200M, env-var overridable) is
+annealed against each environment process's own step count scaled by
+`n_proc`, seeded with `initial_timesteps` recovered from a resumed
+checkpoint's own path. Set it proportional to your actual configured
+`timestep_limit` before a long run — 200M is a starting guess, not a
+researched constant, same caveat the old wall-clock placeholder had.
 
-- On a run longer than two hours, shaping is at zero for most of training. The
-  value is a placeholder — the file's own comment says so. Set it to something
-  proportional to the real run length before you start a long job.
-- Under checkpoint-resume training the clock restarts every session, so the
-  anneal never completes at all. That makes it a correctness bug rather than a
-  tuning question, and it is tracked in `ISSUES.md` (P3) with the reasoning for
-  why it matters to the research argument. Fix by annealing on
-  `cumulative_timesteps`.
+Since it's an *estimate* (exact global `cumulative_timesteps` isn't
+available inside an environment subprocess without forking `rlgym_ppo`
+internals — see `AnnealedCombinedReward`'s docstring in `Rewards.py`), it
+assumes all `n_proc` processes advance at roughly the same rate. That's the
+same "close enough in practice" tradeoff the wall-clock version made
+explicitly; the fix is that it no longer resets to zero on resume.
 
 **5. `checkpoint_load_folder` defaults to the string `"latest"`, not `None`.**
 Omitting it does not mean "fresh start" — `Learner` scans for a prior run's

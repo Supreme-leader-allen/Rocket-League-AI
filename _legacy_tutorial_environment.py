@@ -1,3 +1,17 @@
+"""
+Leftover first-draft tutorial code: 1v1, DefaultObs (full information,
+zero_padding=None), no partial-info/humanlike constraints, no
+coordination metrics. Nothing to do with this project's actual 4v4
+research setup -- see Train_Ground.py/Train_Aerial.py for that. Renamed
+from Environment.py (docs/ISSUES.md P3): it was the only filename in the
+repo that read like "the main environment" and had a working __main__
+that really starts a training run with no relationship to the research
+setup, so it was one accidental `python Environment.py` away from
+producing a misleading result. Left in place for reference only, same as
+train_phase1.py/src/ -- safe to ignore or delete locally.
+"""
+
+
 def build_rlgym_v2_env():
     from Rewards import InAirReward, SpeedTowardBallReward, VelocityBallToGoalReward
 

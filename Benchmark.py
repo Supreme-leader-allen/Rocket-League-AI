@@ -118,11 +118,16 @@ def build_env(obs_mode="project", metrics_dir=None):
     metrics_dir = metrics_dir or os.path.join(PROJECT_DIR, ".benchmark_tmp")
     os.makedirs(metrics_dir, exist_ok=True)
 
+    # AnnealedCombinedReward now anneals on estimated cumulative timesteps
+    # rather than wall-clock time (docs/ISSUES.md P3) -- n_proc/
+    # initial_timesteps default to 1/0.0, which is fine here since this
+    # function only measures throughput and never runs long enough for
+    # the anneal's progress value to matter.
     shaping = AnnealedCombinedReward(
         weighted_rewards=[(SpeedTowardBallReward(), 0.01, 0.0),
                           (VelocityBallToGoalReward(), 0.1, 0.02),
                           (InAirReward(), 0.002, 0.0)],
-        anneal_seconds=2 * 60 * 60)
+        anneal_timesteps=200_000_000)
 
     entries = [(shaping, 1.0)]
     if obs_mode == "project":

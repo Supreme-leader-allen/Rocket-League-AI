@@ -47,6 +47,21 @@ population member trains at a time) with N_PROC_PER_MEMBER=8, not
 Train_Ground.py's standalone default of 32 -- running a whole population
 in parallel multiplies environment count by population size, which
 isn't realistic on most single machines.
+
+All four are also readable from PBT_POPULATION_SIZE / PBT_N_GENERATIONS /
+PBT_GENERATION_TIMESTEPS / PBT_N_PROC_PER_MEMBER env vars (module-level
+constant stays the fallback default), same pattern Train_Ground.py's
+ANNEAL_TIMESTEPS and Observation.py's FOV_HALF_ANGLE_DEG already use --
+this is what lets experiments/06_pbt.sh drive this file without editing
+it (docs/ISSUES.md). Checked against Train_Ground.py's own env var reads
+before picking these names: none of PBT_POPULATION_SIZE/PBT_N_GENERATIONS/
+PBT_GENERATION_TIMESTEPS/PBT_N_PROC_PER_MEMBER collide with the inner
+per-subprocess channel this file already uses (PBT_POLICY_LR,
+PBT_CRITIC_LR, PBT_ENT_COEF, PBT_N_PROC, PBT_CHECKPOINT_DIR,
+PBT_CHECKPOINT_LOAD_DIR, PBT_TIMESTEP_LIMIT, PBT_SAVE_EVERY_TS,
+PBT_RUN_LABEL, PBT_CSV_PATH, PBT_FITNESS_CSV_PATH) -- those configure
+each Train_Ground.py subprocess, these configure the outer PBT loop
+itself, and the two sets must never share a name.
 """
 
 import json
@@ -57,17 +72,39 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-POPULATION_SIZE = 4
-N_GENERATIONS = 10
-GENERATION_TIMESTEPS = 2_000_000
-N_PROC_PER_MEMBER = 8
+POPULATION_SIZE = int(os.environ.get("PBT_POPULATION_SIZE", 4))
+N_GENERATIONS = int(os.environ.get("PBT_N_GENERATIONS", 10))
+GENERATION_TIMESTEPS = int(os.environ.get("PBT_GENERATION_TIMESTEPS", 2_000_000))
+N_PROC_PER_MEMBER = int(os.environ.get("PBT_N_PROC_PER_MEMBER", 8))
 EVAL_EPISODES_PER_MATCHUP = 4
 BOTTOM_FRACTION = 0.25  # fraction of the population replaced each generation
 PERTURB_RANGE = (0.8, 1.2)
 
-CHECKPOINT_ROOT = "checkpoints/pbt"
-CSV_ROOT = "metrics/pbt"
-GENERATION_LOG_PATH = os.path.join(CSV_ROOT, "generations.jsonl")
+# PBT_OUT_DIR points every path this file writes at the same $OUT
+# directory experiments/params.sh resolves for every other script, so
+# experiments/06_pbt.sh's results land alongside 00_baseline.csv,
+# 01_ground's checkpoints, etc. instead of under a repo-relative
+# checkpoints/pbt, metrics/pbt (docs/ISSUES.md). Unset -- the default,
+# for a standalone `python Pbt.py` -- keeps the original relative
+# layout unchanged, nested under metrics/pbt exactly as before.
+#
+# CSV_ROOT is FLAT under $OUT/metrics (NOT nested in a pbt/ subfolder)
+# when PBT_OUT_DIR is set, so pbt_member_N_{coordination,fitness} CSVs
+# sit alongside 00_baseline.csv etc. for Plot_Results.py to pick up --
+# only run_label (already "pbt_member_0".."pbt_member_3") differentiates
+# them from the other experiments' shards, not directory nesting.
+# generations.jsonl is the one exception and stays nested at
+# metrics/pbt/ specifically, since Plot_Results.py's plot_pbt_generations
+# looks for it at exactly that path regardless of PBT_OUT_DIR.
+PBT_OUT_DIR = os.environ.get("PBT_OUT_DIR")
+if PBT_OUT_DIR:
+    CHECKPOINT_ROOT = os.path.join(PBT_OUT_DIR, "checkpoints", "pbt")
+    CSV_ROOT = os.path.join(PBT_OUT_DIR, "metrics")
+    GENERATION_LOG_PATH = os.path.join(PBT_OUT_DIR, "metrics", "pbt", "generations.jsonl")
+else:
+    CHECKPOINT_ROOT = "checkpoints/pbt"
+    CSV_ROOT = "metrics/pbt"
+    GENERATION_LOG_PATH = os.path.join(CSV_ROOT, "generations.jsonl")
 
 INITIAL_POLICY_LR = 1e-4
 INITIAL_CRITIC_LR = 1e-4
@@ -78,7 +115,21 @@ INITIAL_ENT_COEF = 0.01
 # for why (Learner only saves periodically, never on exit at
 # timestep_limit). Kept well under GENERATION_TIMESTEPS so at least a
 # few checkpoints land per generation, not just barely one.
-SAVE_EVERY_TS = max(200_000, GENERATION_TIMESTEPS // 8)
+#
+# No hardcoded floor here on purpose: with GENERATION_TIMESTEPS now
+# env-var-overridable (e.g. by experiments/06_pbt.sh's ROUND-driven
+# smoke tests) a fixed floor like max(200_000, ...) would silently win
+# over a small override -- at GENERATION_TIMESTEPS=20_000 that would
+# make SAVE_EVERY_TS=200_000 > GENERATION_TIMESTEPS, so ts_since_last_save
+# would never reach it within the generation and it would complete
+# without saving anything at all, exactly the failure this line exists
+# to prevent. GENERATION_TIMESTEPS // 8 alone is safe at any scale: the
+# real floor on how few steps get collected before a save is checked is
+# Train_Ground.py's hardcoded ts_per_iteration (100_000), not this value,
+# so as long as this stays under that -- true for any GENERATION_TIMESTEPS
+# up to 800_000, and unchanged from before at the 2_000_000 default
+# (250_000 either way) -- a save is guaranteed after the first iteration.
+SAVE_EVERY_TS = max(1, GENERATION_TIMESTEPS // 8)
 
 
 class PopulationMember:
@@ -173,7 +224,6 @@ def train_generation(member: PopulationMember, generation: int) -> None:
     env["PBT_ENT_COEF"] = str(member.ent_coef)
     env["PBT_N_PROC"] = str(N_PROC_PER_MEMBER)
     env["PBT_CHECKPOINT_DIR"] = member.checkpoint_dir
-    env["PBT_TIMESTEP_LIMIT"] = str(GENERATION_TIMESTEPS)
     env["PBT_SAVE_EVERY_TS"] = str(SAVE_EVERY_TS)
     env["PBT_RUN_LABEL"] = member.run_label
     env["PBT_CSV_PATH"] = os.path.join(CSV_ROOT, f"{member.run_label}_coordination.csv")
@@ -182,14 +232,31 @@ def train_generation(member: PopulationMember, generation: int) -> None:
     load_folder = member.pending_load_override or member.latest_checkpoint()
     if load_folder:
         env["PBT_CHECKPOINT_LOAD_DIR"] = load_folder
+        # Learner.load() restores cumulative_timesteps from the checkpoint
+        # (confirmed against Learner.save()'s source: the digit-named
+        # checkpoint subfolder IS str(cumulative_timesteps), so this reads
+        # it straight off the resolved path without touching
+        # BOOK_KEEPING_VARS.json), and its main loop is a plain
+        # `while cumulative_timesteps < timestep_limit`. An absolute
+        # PBT_TIMESTEP_LIMIT (e.g. always GENERATION_TIMESTEPS) means
+        # every generation after the first loads a checkpoint whose
+        # cumulative_timesteps already meets or exceeds that same
+        # absolute value, so the loop exits on iteration zero having
+        # trained nothing -- see docs/ISSUES.md P1. The limit has to be
+        # relative to what was actually loaded.
+        loaded_ts = int(os.path.basename(load_folder))
     else:
         env.pop("PBT_CHECKPOINT_LOAD_DIR", None)
+        loaded_ts = 0
+
+    env["PBT_TIMESTEP_LIMIT"] = str(loaded_ts + GENERATION_TIMESTEPS)
 
     source = "exploited checkpoint" if member.pending_load_override else \
         ("own lineage" if load_folder else "fresh start")
     print(f"[gen {generation}] training member {member.member_id} "
           f"(policy_lr={member.policy_lr:.2e}, critic_lr={member.critic_lr:.2e}, "
-          f"ent_coef={member.ent_coef:.4f}, warm start: {source})")
+          f"ent_coef={member.ent_coef:.4f}, warm start: {source}, "
+          f"loaded_ts={loaded_ts}, target_ts={loaded_ts + GENERATION_TIMESTEPS})")
 
     result = subprocess.run([sys.executable, "Train_Ground.py"], env=env)
     member.pending_load_override = None
@@ -276,7 +343,10 @@ def exploit_and_explore(population: List[PopulationMember], generation: int) -> 
 
 
 def log_generation(population: List[PopulationMember], generation: int) -> None:
-    os.makedirs(CSV_ROOT, exist_ok=True)
+    # GENERATION_LOG_PATH's directory, not CSV_ROOT -- the two diverge
+    # when PBT_OUT_DIR is set (CSV_ROOT is flat under $OUT/metrics,
+    # generations.jsonl stays nested at $OUT/metrics/pbt/).
+    os.makedirs(os.path.dirname(GENERATION_LOG_PATH), exist_ok=True)
     with open(GENERATION_LOG_PATH, "a") as f:
         for member in population:
             f.write(json.dumps({

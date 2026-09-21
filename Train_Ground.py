@@ -81,6 +81,18 @@ SAVE_EVERY_TS = int(os.environ.get("PBT_SAVE_EVERY_TS", 1_000_000))
 RUN_LABEL = os.environ.get("PBT_RUN_LABEL", "model_a_ground")
 CSV_PATH = os.environ.get("PBT_CSV_PATH", "metrics/ground_training.csv")
 FITNESS_CSV_PATH = os.environ.get("PBT_FITNESS_CSV_PATH", "metrics/ground_fitness.csv")
+# Budget, in (estimated) cumulative environment timesteps, over which
+# AnnealedCombinedReward decays dense shaping toward zero -- see that
+# class's docstring in Rewards.py for the full mechanism and why it
+# replaced a wall-clock version (docs/ISSUES.md P3). Exposed as an env
+# var (not just a local constant) specifically so an ablation run can
+# set it to something the run will never reach -- e.g.
+# ANNEAL_TIMESTEPS=1000000000 with a much smaller PBT_TIMESTEP_LIMIT --
+# to hold shaping constant and test whether annealing itself is what
+# produces coordination (Liu et al.). AnnealedCombinedReward treats
+# <=0 as "already fully annealed", which is the opposite of "never
+# anneal" -- use a huge value, not 0, for that ablation.
+ANNEAL_TIMESTEPS = float(os.environ.get("ANNEAL_TIMESTEPS", 200_000_000))
 
 
 def build_rlgym_v2_env(run_label: str = None, csv_path: str = None, fitness_csv_path: str = None):
@@ -127,20 +139,36 @@ def build_rlgym_v2_env(run_label: str = None, csv_path: str = None, fitness_csv_
         TimeoutCondition(timeout_seconds=game_timeout_seconds),
     )
 
-    # Dense shaping anneals toward (near-)zero over wall-clock training
-    # time, per Liu et al. -- tune ANNEAL_SECONDS to your actual run
-    # length; 2 hours is a starting guess, not a researched constant.
-    # InAirReward is included but weighted toward 0 throughout: the agent
-    # can still jump/fly any time (full action space), it's just not
-    # rewarded for it in this phase.
-    ANNEAL_SECONDS = 2 * 60 * 60
+    # Dense shaping anneals toward (near-)zero over cumulative training
+    # timesteps, not wall-clock time -- see ANNEAL_TIMESTEPS above and
+    # AnnealedCombinedReward's docstring in Rewards.py for why the
+    # wall-clock version was a confirmed bug (docs/ISSUES.md P3: it
+    # silently restarted at 0 on every checkpoint resume and never
+    # completed on session-limited platforms). InAirReward is included
+    # but weighted toward 0 throughout: the agent can still jump/fly any
+    # time (full action space), it's just not rewarded for it in this
+    # phase.
+    #
+    # If resuming from a checkpoint, recover its cumulative_timesteps
+    # from the digit-named folder in its path (Learner.save()'s own
+    # naming convention -- confirmed against its source, same technique
+    # Pbt.find_latest_checkpoint's resolution and Train_Aerial.py's
+    # timestep_limit fix use) so the anneal continues from wherever
+    # training actually left off instead of restarting at 0.
+    initial_timesteps = 0.0
+    if CHECKPOINT_LOAD_FOLDER:
+        basename = os.path.basename(os.path.normpath(CHECKPOINT_LOAD_FOLDER))
+        if basename.isdigit():
+            initial_timesteps = float(basename)
     shaping = AnnealedCombinedReward(
         weighted_rewards=[
             (SpeedTowardBallReward(), 0.01, 0.0),
             (VelocityBallToGoalReward(), 0.1, 0.02),
             (InAirReward(), 0.002, 0.0),
         ],
-        anneal_seconds=ANNEAL_SECONDS,
+        anneal_timesteps=ANNEAL_TIMESTEPS,
+        n_proc=N_PROC,
+        initial_timesteps=initial_timesteps,
     )
     # Zero-weight -- pure data collection, no effect on training. See
     # metrics.py for what each column means and why overcommit_rate /
