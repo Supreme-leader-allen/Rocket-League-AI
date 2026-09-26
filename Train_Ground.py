@@ -63,7 +63,17 @@ AUX_DATA_DIR = os.environ.get("AUX_DATA_DIR", "metrics/aux_data")
 
 POLICY_LR = float(os.environ.get("PBT_POLICY_LR", 1e-4))
 CRITIC_LR = float(os.environ.get("PBT_CRITIC_LR", 1e-4))
-ENT_COEF = float(os.environ.get("PBT_ENT_COEF", 0.01))
+# Lowered from 0.01 -> 0.001 based on the real 300M-timestep run on Model
+# A (see the science-research session, not a file in this repo): Policy
+# Entropy started at 4.4998 and ended at 4.49853 -- effectively unchanged
+# across the entire run and 17,990 model updates -- while scoring rate
+# did rise (6.35% -> 8.72% of episodes, first-10%-vs-last-10%), showing a
+# real but weak reward gradient that the entropy bonus was swamping. This
+# is a hyperparameter change based on one run's diagnostics, not a
+# confirmed fix -- re-check Policy Entropy's trajectory on the next run
+# before assuming this resolved it, and revisit further if entropy is
+# still flat.
+ENT_COEF = float(os.environ.get("PBT_ENT_COEF", 0.001))
 N_PROC = int(os.environ.get("PBT_N_PROC", 32))
 CHECKPOINTS_SAVE_FOLDER = os.environ.get("PBT_CHECKPOINT_DIR", "checkpoints/model_a_ground")
 CHECKPOINT_LOAD_FOLDER = os.environ.get("PBT_CHECKPOINT_LOAD_DIR") or None

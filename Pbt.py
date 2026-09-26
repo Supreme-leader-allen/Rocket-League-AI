@@ -108,7 +108,10 @@ else:
 
 INITIAL_POLICY_LR = 1e-4
 INITIAL_CRITIC_LR = 1e-4
-INITIAL_ENT_COEF = 0.01
+# Matches Train_Ground.py's ENT_COEF default -- lowered from 0.01, see
+# that file's comment for why (real run showed Policy Entropy stuck near
+# its starting value for the full 300M timesteps).
+INITIAL_ENT_COEF = 0.001
 
 # GENERATION_TIMESTEPS must exceed this or a generation could complete
 # without a single save -- see Train_Ground.py's SAVE_EVERY_TS comment

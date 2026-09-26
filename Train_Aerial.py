@@ -285,7 +285,11 @@ if __name__ == "__main__":
         ts_per_iteration=100_000,
         exp_buffer_size=300_000,
         ppo_minibatch_size=50_000,
-        ppo_ent_coef=0.01,
+        # Matches Train_Ground.py's ENT_COEF default -- see that file's
+        # comment: lowered from 0.01 based on the real ground-phase run
+        # showing Policy Entropy stuck near its starting value for the
+        # entire 300M timesteps. Keep these in sync.
+        ppo_ent_coef=0.001,
         policy_lr=1e-4,
         critic_lr=1e-4,
         ppo_epochs=2,
