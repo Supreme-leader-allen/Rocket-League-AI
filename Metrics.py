@@ -75,6 +75,7 @@ CHALLENGE_DIST_UU = 750.0
 
 CSV_COLUMNS = [
     "run_label", "episode_id", "episode_length_steps",
+    "cumulative_timesteps_estimate",
     "avg_dist_to_ball", "avg_vel_toward_ball", "air_time_fraction",
     "avg_teammate_pairwise_dist", "boost_stddev_teammates",
     "overcommit_rate", "simultaneous_air_rate",
@@ -82,16 +83,37 @@ CSV_COLUMNS = [
 
 
 class CoordinationMetrics(RewardFunction[AgentID, GameState, float]):
-    def __init__(self, csv_path: str, run_label: str):
+    def __init__(self, csv_path: str, run_label: str, n_proc: int = 1, initial_timesteps: float = 0.0):
+        """
+        n_proc/initial_timesteps: same estimated-cumulative-timesteps
+        technique as Rewards.AnnealedCombinedReward (see that class's
+        docstring for why an exact count isn't available inside an
+        environment subprocess, and why `initial_timesteps + local_agent_
+        steps * n_proc` is the accepted approximation elsewhere in this
+        project). Added because episode_id alone doesn't let two runs
+        with different episode lengths, n_proc, or checkpoint-resume
+        history be lined up on a shared x-axis -- entropy/scoring-rate
+        comparisons across runs in the science-research session had to be
+        eyeballed by iteration count instead of read directly off this
+        CSV. Defaults (n_proc=1, initial_timesteps=0.0) match "not
+        passed", so existing callers that don't opt in log 0 for every
+        row rather than breaking.
+        """
         super().__init__()
         # Per-process shard -- see module docstring on why this isn't just
         # csv_path directly.
         p = Path(csv_path)
         self.csv_path = str(p.with_name(f"{p.stem}.{os.getpid()}{p.suffix}"))
         self.run_label = run_label
+        self._n_proc = max(1, n_proc)
+        self._initial_timesteps = initial_timesteps
+        self._local_agent_steps = 0
         self._episode_id = 0
         self._buffers = None
         self._ensure_csv_header()
+
+    def _estimated_cumulative_timesteps(self) -> float:
+        return self._initial_timesteps + self._local_agent_steps * self._n_proc
 
     def _ensure_csv_header(self):
         directory = os.path.dirname(self.csv_path)
@@ -115,6 +137,10 @@ class CoordinationMetrics(RewardFunction[AgentID, GameState, float]):
     def get_rewards(self, agents: List[AgentID], state: GameState, is_terminated: Dict[AgentID, bool],
                      is_truncated: Dict[AgentID, bool], shared_info: Dict[str, Any]) -> Dict[AgentID, float]:
         self._record_step(agents, state)
+        # Same accumulation rule as AnnealedCombinedReward: advances by the
+        # agent count each get_rewards() call, not by 1 -- confirmed
+        # against rlgym_ppo's BatchedAgentManager source (see Rewards.py).
+        self._local_agent_steps += len(agents)
         return {agent: 0.0 for agent in agents}
 
     def _record_step(self, agents: List[AgentID], state: GameState) -> None:
@@ -178,6 +204,7 @@ class CoordinationMetrics(RewardFunction[AgentID, GameState, float]):
 
         row = [
             self.run_label, self._episode_id, b["steps"],
+            self._estimated_cumulative_timesteps(),
             avg("dist_to_ball"), avg("vel_toward_ball"), avg("air"),
             avg("teammate_dist"), avg("boost_std"),
             avg("overcommit"), avg("simultaneous_air"),
@@ -186,7 +213,10 @@ class CoordinationMetrics(RewardFunction[AgentID, GameState, float]):
             csv.writer(f).writerow(row)
 
 
-FITNESS_CSV_COLUMNS = ["run_label", "episode_id", "episode_length_steps", "episode_return"]
+FITNESS_CSV_COLUMNS = [
+    "run_label", "episode_id", "episode_length_steps",
+    "cumulative_timesteps_estimate", "episode_return",
+]
 
 
 class FitnessTracker(RewardFunction[AgentID, GameState, float]):
@@ -214,17 +244,32 @@ class FitnessTracker(RewardFunction[AgentID, GameState, float]):
     caveat -- see that class's docstring for both.
     """
 
-    def __init__(self, inner: RewardFunction, csv_path: str, run_label: str):
+    def __init__(self, inner: RewardFunction, csv_path: str, run_label: str,
+                 n_proc: int = 1, initial_timesteps: float = 0.0):
+        """
+        n_proc/initial_timesteps: see CoordinationMetrics.__init__ -- same
+        estimated-cumulative-timesteps technique, added so
+        cumulative_timesteps_estimate lines up between this CSV and
+        CoordinationMetrics' for the same run (both are constructed with
+        the same n_proc/initial_timesteps in Train_Ground.py/
+        Train_Aerial.py).
+        """
         super().__init__()
         self.inner = inner
         p = Path(csv_path)
         self.csv_path = str(p.with_name(f"{p.stem}.{os.getpid()}{p.suffix}"))
         self.run_label = run_label
+        self._n_proc = max(1, n_proc)
+        self._initial_timesteps = initial_timesteps
+        self._local_agent_steps = 0
         self._episode_id = 0
         self._episode_steps = 0
         self._episode_sum = 0.0
         self._has_data = False
         self._ensure_csv_header()
+
+    def _estimated_cumulative_timesteps(self) -> float:
+        return self._initial_timesteps + self._local_agent_steps * self._n_proc
 
     def _ensure_csv_header(self):
         directory = os.path.dirname(self.csv_path)
@@ -266,10 +311,15 @@ class FitnessTracker(RewardFunction[AgentID, GameState, float]):
                 self._episode_sum += float(np.mean(tracked_team_rewards))
             self._episode_steps += 1
             self._has_data = True
+        # Same accumulation rule as CoordinationMetrics/AnnealedCombinedReward.
+        self._local_agent_steps += len(agents)
         return rewards
 
     def _flush(self) -> None:
-        row = [self.run_label, self._episode_id, self._episode_steps, self._episode_sum]
+        row = [
+            self.run_label, self._episode_id, self._episode_steps,
+            self._estimated_cumulative_timesteps(), self._episode_sum,
+        ]
         with open(self.csv_path, "a", newline="") as f:
             csv.writer(f).writerow(row)
 

@@ -186,6 +186,8 @@ def build_rlgym_v2_env(run_label: str = None, csv_path: str = None, fitness_csv_
     coordination_metrics = CoordinationMetrics(
         csv_path=csv_path,
         run_label=run_label,
+        n_proc=N_PROC,
+        initial_timesteps=initial_timesteps,
     )
 
     # GoalReward wrapped in FitnessTracker: identical contribution to
@@ -194,6 +196,7 @@ def build_rlgym_v2_env(run_label: str = None, csv_path: str = None, fitness_csv_
     # why PBT fitness uses this instead of coordination_metrics' columns.
     fitness_tracked_goal_reward = FitnessTracker(
         GoalReward(), csv_path=fitness_csv_path, run_label=run_label,
+        n_proc=N_PROC, initial_timesteps=initial_timesteps,
     )
 
     reward_entries = [

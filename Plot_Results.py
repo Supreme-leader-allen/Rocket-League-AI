@@ -176,50 +176,61 @@ def plot_metric_trend(df: pd.DataFrame, metric: str, out_dir: Path, window: int 
     only where it ends up -- plot_bar_comparison/plot_histogram_vs_baseline
     above are aggregate/final-state only and can't show that.
 
-    episode_id as the x-axis is a within-run ORDINAL PROXY for training
-    progress, not real cumulative timesteps, and the approximation is
-    weaker than it looks: CoordinationMetrics._episode_id (Metrics.py)
-    starts fresh at 1 in every one of Train_Ground.py's n_proc worker
-    processes independently (confirmed against its source), and
-    _load_coordination_csvs concatenates every process's shard under one
-    run_label. So "episode_id=10" in the resulting frame mixes different
-    workers' 10th episode, which can correspond to noticeably different
-    amounts of actual training if episode lengths vary across workers
-    (they do -- an episode ending in a quick goal vs. running to the
-    no-touch timeout). Binning by episode_id and averaging across
-    processes (done below via groupby) smooths over this somewhat but
-    doesn't fix it. Real cumulative_timesteps isn't logged per-episode
-    anywhere currently -- Learner's actual counter lives in the parent
-    process, not reachable from inside an env subprocess without extra
-    plumbing (same limitation Rewards.py's AnnealedCombinedReward already
-    documents and works around with an n_proc-scaled local-step estimate
-    for the anneal schedule). The same estimation technique could log an
-    approximate cumulative_timesteps column here too, which would make
-    this x-axis a genuine measure of training progress instead of a
-    per-worker ordinal -- worth doing if these trends need to be more
-    than roughly indicative.
+    Prefers `cumulative_timesteps_estimate` (Metrics.py) as the x-axis when
+    it's present in the CSV -- an n_proc-scaled local-step estimate, same
+    technique Rewards.AnnealedCombinedReward already uses for its anneal
+    schedule (see that class's docstring for why an exact count isn't
+    reachable from inside an env subprocess). This resolves the trend
+    plots' original limitation: episode_id starts fresh at 1 in every one
+    of Train_Ground.py's n_proc worker processes independently, so
+    "episode_id=10" mixed different workers' 10th episode, which could
+    correspond to noticeably different amounts of actual training if
+    episode lengths varied across workers. With cumulative_timesteps_
+    estimate, rows from every worker sort onto one shared, genuinely
+    chronological axis instead.
+
+    Falls back to the old episode_id-binned-and-averaged behavior for CSVs
+    from a run predating this column (still present for backward
+    compatibility) -- that path remains only an ordinal proxy, not real
+    timesteps.
     """
-    if metric not in df.columns or "episode_id" not in df.columns:
+    if metric not in df.columns:
+        return
+
+    use_timesteps = "cumulative_timesteps_estimate" in df.columns and \
+        df["cumulative_timesteps_estimate"].notna().any()
+    if not use_timesteps and "episode_id" not in df.columns:
         return
 
     fig, ax = plt.subplots(figsize=(9, 5))
     plotted = False
     for label, sub in df.groupby("run_label"):
-        sub = sub.dropna(subset=[metric, "episode_id"]).sort_values("episode_id")
-        if sub.empty:
-            continue
-        # Average across processes sharing the same nominal episode_id,
-        # then roll -- see docstring on why this is an approximation.
-        by_episode = sub.groupby("episode_id")[metric].mean()
-        rolled = by_episode.rolling(window=window, min_periods=1).mean()
-        ax.plot(by_episode.index, rolled.values, label=label)
+        if use_timesteps:
+            sub = sub.dropna(subset=[metric, "cumulative_timesteps_estimate"])
+            sub = sub.sort_values("cumulative_timesteps_estimate")
+            if sub.empty:
+                continue
+            rolled = sub[metric].rolling(window=window, min_periods=1).mean()
+            ax.plot(sub["cumulative_timesteps_estimate"].values, rolled.values, label=label)
+        else:
+            sub = sub.dropna(subset=[metric, "episode_id"]).sort_values("episode_id")
+            if sub.empty:
+                continue
+            # Average across processes sharing the same nominal episode_id,
+            # then roll -- see docstring on why this is an approximation.
+            by_episode = sub.groupby("episode_id")[metric].mean()
+            rolled = by_episode.rolling(window=window, min_periods=1).mean()
+            ax.plot(by_episode.index, rolled.values, label=label)
         plotted = True
 
     if not plotted:
         plt.close(fig)
         return
 
-    ax.set_xlabel("episode_id (within-run ordinal proxy for training progress -- see docstring)")
+    if use_timesteps:
+        ax.set_xlabel("cumulative_timesteps_estimate (approximate, see docstring)")
+    else:
+        ax.set_xlabel("episode_id (within-run ordinal proxy for training progress -- see docstring)")
     ax.set_ylabel(metric)
     ax.set_title(f"{metric} over training (rolling mean, window={window} episodes)")
     ax.legend()
@@ -310,8 +321,18 @@ def main() -> None:
     if coord_df.empty:
         print(f"No coordination CSV data found under {metrics_dir} -- nothing to plot yet.")
     else:
-        print(f"Loaded {len(coord_df)} episode rows across labels: "
-              f"{sorted(coord_df['run_label'].dropna().unique())}")
+        labels_present = sorted(coord_df["run_label"].dropna().unique())
+        print(f"Loaded {len(coord_df)} episode rows across labels: {labels_present}")
+        if args.baseline_label not in labels_present:
+            print(
+                f"WARNING: baseline_label={args.baseline_label!r} not found in loaded data "
+                f"-- every plot_histogram_vs_baseline output below will silently show ONLY "
+                f"{args.highlight_label!r} with no baseline overlay to compare against (they "
+                f"don't error when one side is empty, so this is easy to miss -- confirmed "
+                f"happening on the science-research session's run). Run experiments/00_baseline.sh "
+                f"(or run_all.sh without CORE_ONLY skipping it) and re-plot before drawing any "
+                f"conclusion from the *_vs_baseline_random histograms."
+            )
         for metric in ALL_METRICS:
             plot_bar_comparison(coord_df, metric, out_dir)
             plot_histogram_vs_baseline(coord_df, metric, args.baseline_label, args.highlight_label, out_dir)

@@ -190,9 +190,13 @@ def build_rlgym_v2_env():
         n_proc=N_PROC,
         initial_timesteps=LOADED_TIMESTEPS,
     )
-    coordination_metrics = CoordinationMetrics(csv_path=CSV_PATH, run_label=RUN_LABEL)
+    coordination_metrics = CoordinationMetrics(
+        csv_path=CSV_PATH, run_label=RUN_LABEL,
+        n_proc=N_PROC, initial_timesteps=LOADED_TIMESTEPS,
+    )
     fitness_tracked_goal_reward = FitnessTracker(
         GoalReward(), csv_path=FITNESS_CSV_PATH, run_label=RUN_LABEL,
+        n_proc=N_PROC, initial_timesteps=LOADED_TIMESTEPS,
     )
 
     reward_fn = CombinedReward(
