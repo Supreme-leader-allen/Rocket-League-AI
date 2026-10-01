@@ -98,6 +98,17 @@ RUN_LABEL = os.environ.get("AERIAL_RUN_LABEL", "model_b_aerial")
 CSV_PATH = os.environ.get("AERIAL_CSV_PATH", "metrics/aerial_training.csv")
 FITNESS_CSV_PATH = os.environ.get("AERIAL_FITNESS_CSV_PATH", "metrics/aerial_fitness.csv")
 
+STATS_CSV_PATH = os.environ.get("AERIAL_STATS_CSV_PATH") or     os.path.splitext(CSV_PATH)[0] + "_training_stats.csv"
+ENT_COEF = 0.01  # same as Train_Ground.py's default -- see its comment
+POLICY_LR = 1e-4
+CRITIC_LR = 1e-4
+# Model B's anneal is measured from Model B's OWN first step. It used to be
+# seeded with initial_timesteps=LOADED_TIMESTEPS against a 200M budget, so
+# a Model A trained past 200M (the planned 300M run) handed Model B a
+# shaping schedule that was already 100% annealed on its first step --
+# the aerial rewards were never actually applied.
+ANNEAL_TIMESTEPS = 200_000_000
+
 AIRBORNE_SPAWN_PROBABILITY = 0.5
 
 
@@ -147,7 +158,7 @@ def build_rlgym_v2_env():
     from rlgym.rocket_league.state_mutators import MutatorSequence, FixedTeamSizeMutator, KickoffMutator
     from rlgym_ppo.util import RLGymV2GymWrapper
 
-    from Rewards import SpeedTowardBallReward, InAirReward, VelocityBallToGoalReward, AnnealedCombinedReward
+    from Rewards import build_shaping
     from Observation import PartialInfoObs
     from Actions import HumanlikeAction
     from Metrics import CoordinationMetrics, FitnessTracker
@@ -165,31 +176,16 @@ def build_rlgym_v2_env():
         TimeoutCondition(timeout_seconds=game_timeout_seconds),
     )
 
-    # Re-annealed from a higher starting point than Train_Ground.py: the
-    # ground behaviors are already learned (warm-started from Model A),
-    # but the aerial behaviors are new and need dense guidance again.
-    # InAirReward's weight is raised (0.2 -> 0.05) instead of held near
-    # zero (Model A used 0.002 -> 0.0) -- this is the one substantive
-    # reward change between the two phases, per ROADMAP.md.
+    # Re-annealed from a higher starting point than Model A's end state:
+    # ground behaviors are already learned (warm-started from Model A), but
+    # aerial behaviors are new and need dense guidance again. Weights are in
+    # Rewards.SHAPING_SCHEDULES["aerial"]; InAirReward is raised there
+    # instead of held near zero -- the one substantive reward change between
+    # the two phases, per ROADMAP.md.
     #
-    # Annealed over cumulative timesteps, not wall-clock time -- see
-    # AnnealedCombinedReward's docstring in Rewards.py for why the
-    # wall-clock version was a confirmed bug (docs/ISSUES.md P3), and
-    # LOADED_TIMESTEPS's docstring above for why it's computed at module
-    # top level. initial_timesteps is seeded from Model A's own
-    # checkpoint progress (LOADED_TIMESTEPS) rather than 0, since Model
-    # B's very first step already starts from a policy that isn't naive.
-    ANNEAL_TIMESTEPS = 200_000_000
-    shaping = AnnealedCombinedReward(
-        weighted_rewards=[
-            (SpeedTowardBallReward(), 0.01, 0.0),
-            (VelocityBallToGoalReward(), 0.1, 0.02),
-            (InAirReward(), 0.2, 0.05),
-        ],
-        anneal_timesteps=ANNEAL_TIMESTEPS,
-        n_proc=N_PROC,
-        initial_timesteps=LOADED_TIMESTEPS,
-    )
+    # Annealed over Model B's own timesteps (initial_timesteps=0) -- see
+    # ANNEAL_TIMESTEPS above for why not Model A's.
+    shaping = build_shaping("aerial", ANNEAL_TIMESTEPS, N_PROC, 0.0)
     coordination_metrics = CoordinationMetrics(
         csv_path=CSV_PATH, run_label=RUN_LABEL,
         n_proc=N_PROC, initial_timesteps=LOADED_TIMESTEPS,
@@ -270,41 +266,27 @@ if __name__ == "__main__":
           f"training to timestep_limit={TIMESTEP_LIMIT} "
           f"(+{AERIAL_ADDITIONAL_TIMESTEPS} new steps).")
 
-    min_inference_size = max(1, int(round(N_PROC * 0.9)))
+    from Train_Ground import shared_learner_kwargs
+    from Metrics import TrainingStatsLogger
 
-    # Must stay byte-for-byte identical to Train_Ground.py's -- this is
-    # what makes checkpoint_load_folder a valid warm start instead of a
-    # shape-mismatch error.
-    POLICY_LAYER_SIZES = [2048, 2048, 1024, 1024]
-    CRITIC_LAYER_SIZES = [2048, 2048, 1024, 1024]
-
-    learner = Learner(
-        build_rlgym_v2_env,
-        n_proc=N_PROC,
-        min_inference_size=min_inference_size,
-        metrics_logger=None,
-        ppo_batch_size=100_000,
-        policy_layer_sizes=POLICY_LAYER_SIZES,
-        critic_layer_sizes=CRITIC_LAYER_SIZES,
-        ts_per_iteration=100_000,
-        exp_buffer_size=300_000,
-        ppo_minibatch_size=50_000,
-        # Matches Train_Ground.py's ENT_COEF default -- see that file's
-        # comment: lowered from 0.01 based on the real ground-phase run
-        # showing Policy Entropy stuck near its starting value for the
-        # entire 300M timesteps. Keep these in sync.
-        ppo_ent_coef=0.001,
-        policy_lr=1e-4,
-        critic_lr=1e-4,
-        ppo_epochs=2,
-        standardize_returns=True,
-        standardize_obs=False,
+    # Layer sizes come from Train_Ground.py (shared_learner_kwargs) -- they
+    # must match Model A's checkpoint exactly.
+    learner_kwargs = shared_learner_kwargs(N_PROC)
+    learner_kwargs.update(
+        ppo_ent_coef=ENT_COEF,
+        policy_lr=POLICY_LR,
+        critic_lr=CRITIC_LR,
         save_every_ts=SAVE_EVERY_TS,
         checkpoints_save_folder=CHECKPOINTS_SAVE_FOLDER,
         timestep_limit=TIMESTEP_LIMIT,
-        log_to_wandb=False,
-        render=RENDER,
-        render_delay=0,
         checkpoint_load_folder=CHECKPOINT_TO_LOAD,
     )
+
+    TrainingStatsLogger(
+        STATS_CSV_PATH, RUN_LABEL, n_actions=90, ent_coef=ENT_COEF,
+        policy_lr=POLICY_LR, critic_lr=CRITIC_LR, anneal_timesteps=ANNEAL_TIMESTEPS,
+        anneal_start_timesteps=LOADED_TIMESTEPS,
+    ).install()
+
+    learner = Learner(build_rlgym_v2_env, **learner_kwargs)
     learner.learn()

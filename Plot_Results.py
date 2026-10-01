@@ -52,11 +52,30 @@ COORDINATION_METRICS = [
     "boost_stddev_teammates",
     "overcommit_rate",
     "simultaneous_air_rate",
+    # role/rotation metrics, added 2026-09-30 -- see Metrics.py's docstring
+    "goal_side_rate",
+    "first_man_changes_per_minute",
+    "depth_spread",
+    "boost_first_minus_last",
+    "touch_share_evenness",
 ]
 MECHANICAL_METRICS = [
     "avg_dist_to_ball",
     "avg_vel_toward_ball",
     "air_time_fraction",
+    "touches_per_minute",
+    "avg_speed",
+    "supersonic_fraction",
+    "scored",  # derived: 1 if the episode ended in a goal (episode_outcome != "timeout")
+]
+TRAINING_STATS_METRICS = [
+    "entropy_fraction_of_max",
+    "mean_kl_divergence",
+    "clip_fraction",
+    "value_function_loss",
+    "policy_update_magnitude",
+    "policy_reward",
+    "overall_steps_per_second",
 ]
 ALL_METRICS = COORDINATION_METRICS + MECHANICAL_METRICS
 
@@ -68,7 +87,7 @@ def _load_coordination_csvs(metrics_dir: Path) -> pd.DataFrame:
     # and glob("*.csv") would otherwise mix schemas).
     frames = []
     for path in sorted(metrics_dir.glob("*.csv")):
-        if "_fitness." in path.name or path.name.startswith("pbt"):
+        if "_fitness." in path.name or path.name.startswith("pbt") or "_training_stats" in path.name:
             continue
         try:
             df = pd.read_csv(path)
@@ -94,7 +113,10 @@ def _load_coordination_csvs(metrics_dir: Path) -> pd.DataFrame:
     # pd.to_numeric coercion here is kept anyway as cheap, harmless
     # insurance against a genuinely non-numeric value some other way
     # (not something confirmed to happen, just cheap enough not to skip).
-    for metric in ALL_METRICS:
+    if "episode_outcome" in df.columns:
+        outcome = df["episode_outcome"]
+        df["scored"] = outcome.where(outcome.isna(), (outcome != "timeout").astype(float))
+    for metric in ALL_METRICS + ["cumulative_timesteps_estimate"]:
         if metric in df.columns:
             df[metric] = pd.to_numeric(df[metric], errors="coerce")
     if "episode_id" in df.columns:
@@ -239,6 +261,46 @@ def plot_metric_trend(df: pd.DataFrame, metric: str, out_dir: Path, window: int 
     plt.close(fig)
 
 
+def _load_training_stats(metrics_dir: Path) -> pd.DataFrame:
+    frames = []
+    for path in sorted(metrics_dir.rglob("*_training_stats.csv")):
+        try:
+            frames.append(pd.read_csv(path))
+        except Exception as e:
+            print(f"skip {path.name}: {e}")
+    if not frames:
+        return pd.DataFrame()
+    df = pd.concat(frames, ignore_index=True)
+    for col in TRAINING_STATS_METRICS + ["cumulative_timesteps"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
+def plot_training_stats(stats_df: pd.DataFrame, out_dir: Path) -> None:
+    """One panel per PPO stat vs cumulative timesteps (Metrics.TrainingStatsLogger).
+    entropy_fraction_of_max is the first thing to check: pinned at 1.0
+    means the policy is still uniform random and has learned nothing."""
+    metrics = [m for m in TRAINING_STATS_METRICS if m in stats_df.columns]
+    if not metrics or "cumulative_timesteps" not in stats_df.columns:
+        return
+    fig, axes = plt.subplots(len(metrics), 1, figsize=(9, 2.6 * len(metrics)), sharex=True)
+    for ax, metric in zip(axes, metrics):
+        for label, sub in stats_df.groupby("run_label"):
+            sub = sub.dropna(subset=[metric, "cumulative_timesteps"]).sort_values("cumulative_timesteps")
+            if not sub.empty:
+                ax.plot(sub["cumulative_timesteps"].values, sub[metric].values, label=label)
+        ax.set_ylabel(metric, fontsize=8)
+        if metric == "entropy_fraction_of_max":
+            ax.axhline(1.0, color="grey", linestyle=":", linewidth=1)
+    axes[0].legend(fontsize=8)
+    axes[-1].set_xlabel("cumulative_timesteps")
+    fig.suptitle("PPO training stats")
+    fig.tight_layout()
+    fig.savefig(out_dir / "training_stats.png", dpi=120)
+    plt.close(fig)
+
+
 def plot_fitness_distribution(fitness_df: pd.DataFrame, out_dir: Path) -> None:
     if fitness_df.empty or "episode_return" not in fitness_df.columns:
         return
@@ -336,8 +398,14 @@ def main() -> None:
         for metric in ALL_METRICS:
             plot_bar_comparison(coord_df, metric, out_dir)
             plot_histogram_vs_baseline(coord_df, metric, args.baseline_label, args.highlight_label, out_dir)
-        for metric in COORDINATION_METRICS:
+        for metric in ALL_METRICS:
             plot_metric_trend(coord_df, metric, out_dir)
+
+    stats_df = _load_training_stats(metrics_dir)
+    if not stats_df.empty:
+        print(f"Loaded {len(stats_df)} PPO iteration rows across labels: "
+              f"{sorted(stats_df['run_label'].dropna().unique())}")
+        plot_training_stats(stats_df, out_dir)
 
     if not fitness_df.empty:
         print(f"Loaded {len(fitness_df)} fitness rows across labels: "

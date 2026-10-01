@@ -82,4 +82,14 @@ several that are easy to get wrong from reading the code alone.
 - `POLICY_LAYER_SIZES` / `CRITIC_LAYER_SIZES` must stay identical between
   `Train_Ground.py` and `Train_Aerial.py`, or warm-starting Model B from Model
   A's checkpoint fails on a shape mismatch.
+- The observation is 243 wide (`DefaultObs` 212 + 31 from `PartialInfoObs`:
+  pending actions and per-car staleness). Changing it, the action table, or
+  the layer sizes makes every existing checkpoint unloadable.
+- Shaping terms and weights live only in `Rewards.SHAPING_SCHEDULES`; both
+  training scripts build from it.
+- To judge whether a run is learning at all, read
+  `<run>_training_stats.csv`'s `entropy_fraction_of_max` first (1.0 = uniform
+  random policy), then `touches_per_minute` in the episode CSV against the
+  baseline. Two full runs were lost to a policy that never left uniform — see
+  the 2026-09-30 P0 in `docs/ISSUES.md`.
 - Never commit checkpoints or metrics output. See `.gitignore`.

@@ -45,6 +45,30 @@ two derived metrics):
 - simultaneous_air_rate: fraction of steps where 2+ teammates are
   airborne at once.
 
+Role and rotation metrics (added 2026-09-30). The four coordination
+columns above only describe spread; they can't show WHO is doing what,
+which is what "roles emerged" actually means:
+- goal_side_rate: fraction of (team, step) pairs where at least one
+  teammate is between the ball and its own goal (by field length). The
+  "someone stays back" property; a pure ball-chasing team scores low.
+- first_man_changes_per_minute: how often the team's closest-to-ball car
+  changes. Rotation frequency -- 0 means one car hogs the ball forever, a
+  very high value means nobody commits.
+- depth_spread: std of teammates' y (field-length) positions, averaged.
+  Formation depth: first/second/third man stagger shows up here, where
+  avg_teammate_pairwise_dist can't tell side-by-side from front-to-back.
+- boost_first_minus_last: boost of the closest-to-ball teammate minus the
+  farthest. Rotating teams send the low-boost car back to collect.
+- touch_share_evenness: normalized entropy of how ball touches are split
+  among teammates (1 = evenly shared, 0 = one car takes every touch),
+  averaged over teams that touched the ball at all.
+- touches_per_minute, avg_speed (uu/s), supersonic_fraction: mechanical
+  progress signals that move long before coordination does -- if these are
+  flat, nothing downstream can have been learned yet.
+- episode_outcome: "blue", "orange" or "timeout".
+- shaping_progress: AnnealedCombinedReward's anneal fraction (0 -> 1) at
+  the episode's end, so each row can be placed on the shaping schedule.
+
 Output: one CSV row per completed episode. IMPORTANT: rlgym_ppo runs
 n_proc separate environment processes in parallel, and build_rlgym_v2_env
 (hence this class) gets constructed once per process -- so with
@@ -79,7 +103,15 @@ CSV_COLUMNS = [
     "avg_dist_to_ball", "avg_vel_toward_ball", "air_time_fraction",
     "avg_teammate_pairwise_dist", "boost_stddev_teammates",
     "overcommit_rate", "simultaneous_air_rate",
+    # added 2026-09-30 -- see "Role and rotation metrics" in the module docstring
+    "episode_outcome", "shaping_progress",
+    "touches_per_minute", "touch_share_evenness",
+    "goal_side_rate", "first_man_changes_per_minute",
+    "depth_spread", "boost_first_minus_last",
+    "avg_speed", "supersonic_fraction",
 ]
+
+STEPS_PER_MINUTE = 15 * 60  # 120 Hz physics / 8-tick action repeat = 15 decisions/sec
 
 
 class CoordinationMetrics(RewardFunction[AgentID, GameState, float]):
@@ -132,11 +164,18 @@ class CoordinationMetrics(RewardFunction[AgentID, GameState, float]):
             "dist_to_ball": [], "vel_toward_ball": [], "air": [],
             "teammate_dist": [], "boost_std": [],
             "overcommit": [], "simultaneous_air": [],
+            "goal_side": [], "depth_spread": [], "boost_first_last": [],
+            "speed": [], "supersonic": [],
+            "first_man_changes": 0, "touches": {},
+            "outcome": "timeout", "shaping_progress": "", "team_sizes": {},
         }
+        self._prev_first_man = {}
 
     def get_rewards(self, agents: List[AgentID], state: GameState, is_terminated: Dict[AgentID, bool],
                      is_truncated: Dict[AgentID, bool], shared_info: Dict[str, Any]) -> Dict[AgentID, float]:
         self._record_step(agents, state)
+        if "shaping_progress" in shared_info:
+            self._buffers["shaping_progress"] = shared_info["shaping_progress"]
         # Same accumulation rule as AnnealedCombinedReward: advances by the
         # agent count each get_rewards() call, not by 1 -- confirmed
         # against rlgym_ppo's BatchedAgentManager source (see Rewards.py).
@@ -182,6 +221,35 @@ class CoordinationMetrics(RewardFunction[AgentID, GameState, float]):
             boost_stds.append(np.std([state.cars[a].boost_amount for a in team_agents]))
 
         b = self._buffers
+        for is_orange, team_agents in teams.items():
+            if not team_agents:
+                continue
+            b["team_sizes"][is_orange] = len(team_agents)
+            ys = [state.cars[a].physics.position[1] for a in team_agents]
+            # own goal is -y for blue, +y for orange
+            goal_side = any((y > ball_pos[1]) if is_orange else (y < ball_pos[1]) for y in ys)
+            b["goal_side"].append(goal_side)
+            if len(team_agents) >= 2:
+                b["depth_spread"].append(np.std(ys))
+                ranked = sorted(team_agents, key=lambda a: np.linalg.norm(state.cars[a].physics.position - ball_pos))
+                b["boost_first_last"].append(state.cars[ranked[0]].boost_amount - state.cars[ranked[-1]].boost_amount)
+                prev = self._prev_first_man.get(is_orange)
+                if prev is not None and prev != ranked[0]:
+                    b["first_man_changes"] += 1
+                self._prev_first_man[is_orange] = ranked[0]
+            for a in team_agents:
+                touches = state.cars[a].ball_touches
+                if touches:
+                    team_touches = b["touches"].setdefault(is_orange, {})
+                    team_touches[a] = team_touches.get(a, 0) + touches
+
+        for agent in agents:
+            car = state.cars[agent]
+            b["speed"].append(np.linalg.norm(car.physics.linear_velocity))
+            b["supersonic"].append(car.is_supersonic)
+        if state.goal_scored:
+            b["outcome"] = "orange" if state.scoring_team == 1 else "blue"
+
         b["steps"] += 1
         b["dist_to_ball"].append(np.mean(dists_to_ball))
         if vels_toward_ball:
@@ -202,12 +270,30 @@ class CoordinationMetrics(RewardFunction[AgentID, GameState, float]):
         def avg(key):
             return float(np.mean(b[key])) if b[key] else ""
 
+        minutes = b["steps"] / STEPS_PER_MINUTE
+        total_touches = sum(sum(t.values()) for t in b["touches"].values())
+        evenness = []
+        for is_orange, team_touches in b["touches"].items():
+            team_size = b["team_sizes"].get(is_orange, 1)
+            if team_size < 2:
+                continue
+            counts = np.array(list(team_touches.values()), dtype=float)
+            p = counts / counts.sum()
+            evenness.append(float(-(p * np.log(p)).sum() / np.log(team_size)))
+
         row = [
             self.run_label, self._episode_id, b["steps"],
             self._estimated_cumulative_timesteps(),
             avg("dist_to_ball"), avg("vel_toward_ball"), avg("air"),
             avg("teammate_dist"), avg("boost_std"),
             avg("overcommit"), avg("simultaneous_air"),
+            b["outcome"], b["shaping_progress"],
+            total_touches / minutes if minutes > 0 else "",
+            float(np.mean(evenness)) if evenness else "",
+            avg("goal_side"),
+            b["first_man_changes"] / minutes if minutes > 0 else "",
+            avg("depth_spread"), avg("boost_first_last"),
+            avg("speed"), avg("supersonic"),
         ]
         with open(self.csv_path, "a", newline="") as f:
             csv.writer(f).writerow(row)
@@ -392,3 +478,95 @@ class AuxiliaryDataLogger(RewardFunction[AgentID, GameState, float]):
         self._shard_index += 1
         self._obs_buffer = []
         self._reward_buffer = []
+
+TRAINING_STATS_COLUMNS = [
+    "run_label", "wall_time", "cumulative_timesteps", "cumulative_model_updates",
+    "policy_entropy", "entropy_fraction_of_max", "mean_kl_divergence",
+    "clip_fraction", "value_function_loss", "policy_update_magnitude",
+    "value_update_magnitude", "policy_reward", "overall_steps_per_second",
+    "ent_coef", "policy_lr", "critic_lr", "anneal_progress",
+]
+
+
+class TrainingStatsLogger:
+    """
+    One CSV row per PPO iteration with the learner-side numbers that
+    previously only existed in the console: policy entropy, KL, clip
+    fraction, value loss, update magnitudes, steps/sec -- plus the run's
+    ent_coef / learning rates and the shaping anneal's progress, so they can
+    be joined against CoordinationMetrics' per-episode rows on
+    cumulative_timesteps.
+
+    Why this exists: the two failed runs were diagnosed by reading entropy
+    off console logs by hand. entropy_fraction_of_max (entropy / ln(n_actions))
+    is the column to watch first -- 1.0 means the policy is exactly uniform,
+    i.e. it has learned nothing. A healthy run drops visibly below 1.0
+    within the first few tens of millions of timesteps.
+
+    Hook: rlgym_ppo's Learner._learn builds a `report` dict each iteration
+    (PPOLearner.learn's stats + "Cumulative Timesteps", "Policy Reward",
+    etc.) and passes it to rlgym_ppo.util.reporting.report_metrics, looked
+    up through the module at call time (confirmed against learner.py's
+    source: `reporting.report_metrics(loggable_metrics=report, ...)`).
+    install() wraps that function, so this needs no fork of rlgym_ppo and
+    nothing in the env processes. metrics_logger (Learner's official hook)
+    was checked and rejected: its report_metrics only receives per-step
+    game-state metrics collected in the env processes, never the PPO stats.
+
+    Runs in the main training process only, so it writes one plain file --
+    no per-process sharding needed.
+    """
+
+    def __init__(self, csv_path: str, run_label: str, n_actions: int, ent_coef: float,
+                 policy_lr: float, critic_lr: float, anneal_timesteps: float = 0.0,
+                 anneal_start_timesteps: float = 0.0):
+        self.csv_path = csv_path
+        self.run_label = run_label
+        self.max_entropy = float(np.log(n_actions))
+        self.ent_coef = ent_coef
+        self.policy_lr = policy_lr
+        self.critic_lr = critic_lr
+        self.anneal_timesteps = anneal_timesteps
+        self.anneal_start_timesteps = anneal_start_timesteps
+        directory = os.path.dirname(csv_path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        if not os.path.exists(csv_path):
+            with open(csv_path, "w", newline="") as f:
+                csv.writer(f).writerow(TRAINING_STATS_COLUMNS)
+
+    def install(self) -> None:
+        import time
+        from rlgym_ppo.util import reporting
+
+        original = reporting.report_metrics
+        if getattr(original, "_training_stats_logger", False):
+            return
+
+        def report_metrics(loggable_metrics, debug_metrics, wandb_run=None):
+            try:
+                self._write(loggable_metrics, time.time())
+            except Exception as e:  # logging must never kill a training run
+                print(f"TrainingStatsLogger: failed to write row ({e!r})")
+            return original(loggable_metrics, debug_metrics, wandb_run)
+
+        report_metrics._training_stats_logger = True
+        reporting.report_metrics = report_metrics
+
+    def _write(self, m: Dict[str, Any], wall_time: float) -> None:
+        ts = m.get("Cumulative Timesteps", "")
+        entropy = m.get("Policy Entropy", "")
+        progress = ""
+        if self.anneal_timesteps > 0 and ts != "":
+            progress = min(1.0, max(0.0, float(ts) - self.anneal_start_timesteps) / self.anneal_timesteps)
+        row = [
+            self.run_label, round(wall_time, 1), ts, m.get("Cumulative Model Updates", ""),
+            entropy, (entropy / self.max_entropy) if entropy != "" else "",
+            m.get("Mean KL Divergence", ""), m.get("SB3 Clip Fraction", ""),
+            m.get("Value Function Loss", ""), m.get("Policy Update Magnitude", ""),
+            m.get("Value Function Update Magnitude", ""), m.get("Policy Reward", ""),
+            m.get("Overall Steps per Second", ""),
+            self.ent_coef, self.policy_lr, self.critic_lr, progress,
+        ]
+        with open(self.csv_path, "a", newline="") as f:
+            csv.writer(f).writerow(row)

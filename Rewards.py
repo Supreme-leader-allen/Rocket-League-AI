@@ -83,6 +83,93 @@ class VelocityBallToGoalReward(RewardFunction[AgentID, GameState, float]):
         return rewards
 
 
+class TouchBallReward(RewardFunction[AgentID, GameState, float]):
+    """1.0 on every step the agent touched the ball (car.ball_touches > 0,
+    RocketSim's per-step touch counter -- confirmed against
+    rlgym.rocket_league.sim.rocketsim_engine's touch callback).
+
+    The single most important early-training reward for RLGym bots
+    (ZealanL's RLGym-PPO-Guide, "making a good bot"): a random policy almost
+    never touches the ball, so nothing downstream of a touch -- shots,
+    passes, goals -- can be learned until touching is. It is individual, not
+    team-shared, which is why it is annealed down (see SHAPING_SCHEDULES)."""
+
+    def reset(self, agents: List[AgentID], initial_state: GameState, shared_info: Dict[str, Any]) -> None:
+        pass
+
+    def get_rewards(self, agents: List[AgentID], state: GameState, is_terminated: Dict[AgentID, bool],
+                     is_truncated: Dict[AgentID, bool], shared_info: Dict[str, Any]) -> Dict[AgentID, float]:
+        return {agent: float(state.cars[agent].ball_touches > 0) for agent in agents}
+
+
+class FaceBallReward(RewardFunction[AgentID, GameState, float]):
+    """Cosine between the car's forward vector and the direction to the
+    ball, in [-1, 1]. Cheap orientation shaping that makes driving toward
+    the ball learnable before SpeedTowardBallReward has anything to reward."""
+
+    def reset(self, agents: List[AgentID], initial_state: GameState, shared_info: Dict[str, Any]) -> None:
+        pass
+
+    def get_rewards(self, agents: List[AgentID], state: GameState, is_terminated: Dict[AgentID, bool],
+                     is_truncated: Dict[AgentID, bool], shared_info: Dict[str, Any]) -> Dict[AgentID, float]:
+        rewards = {}
+        ball_pos = state.ball.position
+        for agent in agents:
+            physics = state.cars[agent].physics
+            pos_diff = ball_pos - physics.position
+            dist = np.linalg.norm(pos_diff)
+            rewards[agent] = float(np.dot(physics.forward, pos_diff / dist)) if dist > 1e-6 else 0.0
+        return rewards
+
+
+# (reward class, initial weight, final weight), annealed over ANNEAL_TIMESTEPS
+# by AnnealedCombinedReward. GoalReward (weight 10, team-shared, never
+# annealed) is added separately by the training scripts.
+#
+# Rebalanced 2026-09-30 (docs/ISSUES.md "P0 -- the policy never learned").
+# The previous weights were the RLGym quickstart tutorial's (speed 0.01,
+# ball-to-goal 0.1, air 0.002): measured on this env with random actions,
+# their per-step sum averaged ~0.003 against +-10 per goal, so the only
+# signal PPO saw was rare goals scored mostly by luck, and the policy stayed
+# exactly uniform (entropy == ln 90) for two full runs. These follow the
+# proportions in ZealanL's RLGym-PPO-Guide: touching the ball dominates
+# early, approach/orientation terms make touching discoverable, and a
+# little InAirReward keeps the bot from unlearning jump.
+#
+# Liu et al.'s credit-assignment argument is preserved: the individual
+# terms (touch, speed, face, air) anneal to ~0 so the team-shared goal is
+# what remains, and ball-to-goal velocity -- objective-aligned and not
+# individually exploitable -- keeps a small floor.
+SHAPING_SCHEDULES = {
+    "ground": [
+        (TouchBallReward, 5.0, 0.0),
+        (SpeedTowardBallReward, 0.5, 0.0),
+        (FaceBallReward, 0.1, 0.0),
+        (VelocityBallToGoalReward, 1.0, 0.2),
+        (InAirReward, 0.03, 0.0),
+    ],
+    # Model B: warm-started from Model A, so touching is already learned;
+    # aerial play is new and gets dense InAirReward guidance again.
+    "aerial": [
+        (TouchBallReward, 2.0, 0.0),
+        (SpeedTowardBallReward, 0.2, 0.0),
+        (FaceBallReward, 0.05, 0.0),
+        (VelocityBallToGoalReward, 1.0, 0.2),
+        (InAirReward, 0.2, 0.02),
+    ],
+}
+
+
+def build_shaping(phase: str, anneal_timesteps: float, n_proc: int, initial_timesteps: float):
+    """AnnealedCombinedReward for `phase` ("ground" or "aerial")."""
+    return AnnealedCombinedReward(
+        weighted_rewards=[(cls(), w0, w1) for cls, w0, w1 in SHAPING_SCHEDULES[phase]],
+        anneal_timesteps=anneal_timesteps,
+        n_proc=n_proc,
+        initial_timesteps=initial_timesteps,
+    )
+
+
 class AnnealedCombinedReward(RewardFunction[AgentID, GameState, float]):
     """
     Combines (reward_fn, initial_weight, final_weight) triples and linearly
@@ -149,6 +236,9 @@ class AnnealedCombinedReward(RewardFunction[AgentID, GameState, float]):
     def get_rewards(self, agents: List[AgentID], state: GameState, is_terminated: Dict[AgentID, bool],
                      is_truncated: Dict[AgentID, bool], shared_info: Dict[str, Any]) -> Dict[AgentID, float]:
         progress = self._current_progress()
+        # read by Metrics.CoordinationMetrics, so each episode row records
+        # how far the shaping anneal had got
+        shared_info["shaping_progress"] = progress
         totals = {agent: 0.0 for agent in agents}
 
         for reward_fn, initial_weight, final_weight in self._entries:

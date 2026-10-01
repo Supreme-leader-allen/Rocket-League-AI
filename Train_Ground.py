@@ -63,17 +63,18 @@ AUX_DATA_DIR = os.environ.get("AUX_DATA_DIR", "metrics/aux_data")
 
 POLICY_LR = float(os.environ.get("PBT_POLICY_LR", 1e-4))
 CRITIC_LR = float(os.environ.get("PBT_CRITIC_LR", 1e-4))
-# Lowered from 0.01 -> 0.001 based on the real 300M-timestep run on Model
-# A (see the science-research session, not a file in this repo): Policy
-# Entropy started at 4.4998 and ended at 4.49853 -- effectively unchanged
-# across the entire run and 17,990 model updates -- while scoring rate
-# did rise (6.35% -> 8.72% of episodes, first-10%-vs-last-10%), showing a
-# real but weak reward gradient that the entropy bonus was swamping. This
-# is a hyperparameter change based on one run's diagnostics, not a
-# confirmed fix -- re-check Policy Entropy's trajectory on the next run
-# before assuming this resolved it, and revisit further if entropy is
-# still flat.
-ENT_COEF = float(os.environ.get("PBT_ENT_COEF", 0.001))
+# Back to 0.01 (rlgym_ppo's tutorial value and ZealanL's guide value) after
+# a brief drop to 0.001. The drop was based on reading the 300M-step run's
+# flat Policy Entropy (4.4998 -> 4.4985) as "the entropy bonus is swamping
+# the reward". It can't have been: 4.4998 is ln(90), i.e. the policy was
+# exactly uniform, and the entropy bonus's gradient is exactly ZERO at a
+# uniform distribution -- it cannot hold a policy there. The policy was
+# flat because the reward gave it nothing to learn from (docs/ISSUES.md
+# "P0 -- the policy never learned"), and the second run at 0.001 stayed
+# flat too, which is consistent with that. Once there is a real reward
+# gradient, 0.01 is what keeps the policy from collapsing early onto the
+# first behavior that works.
+ENT_COEF = float(os.environ.get("PBT_ENT_COEF", 0.01))
 N_PROC = int(os.environ.get("PBT_N_PROC", 32))
 CHECKPOINTS_SAVE_FOLDER = os.environ.get("PBT_CHECKPOINT_DIR", "checkpoints/model_a_ground")
 CHECKPOINT_LOAD_FOLDER = os.environ.get("PBT_CHECKPOINT_LOAD_DIR") or None
@@ -91,6 +92,10 @@ SAVE_EVERY_TS = int(os.environ.get("PBT_SAVE_EVERY_TS", 1_000_000))
 RUN_LABEL = os.environ.get("PBT_RUN_LABEL", "model_a_ground")
 CSV_PATH = os.environ.get("PBT_CSV_PATH", "metrics/ground_training.csv")
 FITNESS_CSV_PATH = os.environ.get("PBT_FITNESS_CSV_PATH", "metrics/ground_fitness.csv")
+# Per-iteration PPO stats (entropy, KL, ...) -- see Metrics.TrainingStatsLogger.
+# Defaults to <CSV_PATH stem>_training_stats.csv so every experiment script
+# gets one without passing anything new.
+STATS_CSV_PATH = os.environ.get("PBT_STATS_CSV_PATH") or     os.path.splitext(CSV_PATH)[0] + "_training_stats.csv"
 # Budget, in (estimated) cumulative environment timesteps, over which
 # AnnealedCombinedReward decays dense shaping toward zero -- see that
 # class's docstring in Rewards.py for the full mechanism and why it
@@ -129,7 +134,7 @@ def build_rlgym_v2_env(run_label: str = None, csv_path: str = None, fitness_csv_
     from rlgym.rocket_league.state_mutators import MutatorSequence, FixedTeamSizeMutator, KickoffMutator
     from rlgym_ppo.util import RLGymV2GymWrapper
 
-    from Rewards import SpeedTowardBallReward, InAirReward, VelocityBallToGoalReward, AnnealedCombinedReward
+    from Rewards import build_shaping
     from Observation import PartialInfoObs
     from Actions import HumanlikeAction
     from Metrics import CoordinationMetrics, FitnessTracker
@@ -154,10 +159,9 @@ def build_rlgym_v2_env(run_label: str = None, csv_path: str = None, fitness_csv_
     # AnnealedCombinedReward's docstring in Rewards.py for why the
     # wall-clock version was a confirmed bug (docs/ISSUES.md P3: it
     # silently restarted at 0 on every checkpoint resume and never
-    # completed on session-limited platforms). InAirReward is included
-    # but weighted toward 0 throughout: the agent can still jump/fly any
-    # time (full action space), it's just not rewarded for it in this
-    # phase.
+    # completed on session-limited platforms). InAirReward keeps only a
+    # small weight in this phase -- enough that the bot doesn't unlearn
+    # jumping, not enough to reward flying around.
     #
     # If resuming from a checkpoint, recover its cumulative_timesteps
     # from the digit-named folder in its path (Learner.save()'s own
@@ -170,16 +174,10 @@ def build_rlgym_v2_env(run_label: str = None, csv_path: str = None, fitness_csv_
         basename = os.path.basename(os.path.normpath(CHECKPOINT_LOAD_FOLDER))
         if basename.isdigit():
             initial_timesteps = float(basename)
-    shaping = AnnealedCombinedReward(
-        weighted_rewards=[
-            (SpeedTowardBallReward(), 0.01, 0.0),
-            (VelocityBallToGoalReward(), 0.1, 0.02),
-            (InAirReward(), 0.002, 0.0),
-        ],
-        anneal_timesteps=ANNEAL_TIMESTEPS,
-        n_proc=N_PROC,
-        initial_timesteps=initial_timesteps,
-    )
+    # Terms and weights live in Rewards.SHAPING_SCHEDULES so Model A and
+    # Model B can't silently drift apart -- see the comment there for why
+    # they were rebalanced.
+    shaping = build_shaping("ground", ANNEAL_TIMESTEPS, N_PROC, initial_timesteps)
     # Zero-weight -- pure data collection, no effect on training. See
     # metrics.py for what each column means and why overcommit_rate /
     # simultaneous_air_rate were added on top of your original metric list.
@@ -212,6 +210,9 @@ def build_rlgym_v2_env(run_label: str = None, csv_path: str = None, fitness_csv_
 
     reward_fn = CombinedReward(*reward_entries)
 
+    # Observation size is 243, not 212: PartialInfoObs appends 31 features
+    # (pending actions + per-car visibility) -- see Observation.py.
+    #
     # zero_padding is DefaultObs's "max cars per team" -- for this
     # project's fixed 4v4, that means zero_padding=4, giving 3 padded
     # ally slots (teammates besides self) + 4 padded enemy slots.
@@ -251,29 +252,21 @@ def build_rlgym_v2_env(run_label: str = None, csv_path: str = None, fitness_csv_
     return RLGymV2GymWrapper(rlgym_env)
 
 
-if __name__ == "__main__":
-    from rlgym_ppo import Learner
+# POLICY_LAYER_SIZES / CRITIC_LAYER_SIZES must stay byte-for-byte identical
+# between Model A and Model B -- this is what makes checkpoint_load_folder a
+# valid warm start instead of a shape-mismatch error. Train_Aerial.py imports
+# these (and shared_learner_kwargs) from here rather than copying them. NOT
+# overridable via PBT env vars on purpose: PBT evolves training
+# hyperparameters, not architecture.
+POLICY_LAYER_SIZES = [2048, 2048, 1024, 1024]
+CRITIC_LAYER_SIZES = [2048, 2048, 1024, 1024]
 
-    min_inference_size = max(1, int(round(N_PROC * 0.9)))
 
-    # POLICY_LAYER_SIZES / CRITIC_LAYER_SIZES must stay byte-for-byte
-    # identical in train_aerial.py -- this is what makes checkpoint_load_folder
-    # a valid warm start instead of a shape-mismatch error. NOT overridable
-    # via PBT env vars on purpose: PBT evolves training hyperparameters
-    # (learning rates, entropy coefficient), not architecture -- changing
-    # layer sizes between population members would break checkpoint
-    # exploit/copy entirely.
-    POLICY_LAYER_SIZES = [2048, 2048, 1024, 1024]
-    CRITIC_LAYER_SIZES = [2048, 2048, 1024, 1024]
-
-    # Basic self-play only (both teams mirror the current live policy).
-    # For a real checkpoint pool of frozen past opponents (the actual
-    # autocurriculum mechanism from ROADMAP.md), you need to wire
-    # self_play.CheckpointPool into build_rlgym_v2_env's orange-team
-    # action selection -- not done here yet. See self_play.py.
-    learner_kwargs = dict(
-        n_proc=N_PROC,
-        min_inference_size=min_inference_size,
+def shared_learner_kwargs(n_proc: int) -> dict:
+    """Learner settings common to Model A and Model B."""
+    return dict(
+        n_proc=n_proc,
+        min_inference_size=max(1, int(round(n_proc * 0.9))),
         metrics_logger=None,
         ppo_batch_size=100_000,
         policy_layer_sizes=POLICY_LAYER_SIZES,
@@ -281,18 +274,30 @@ if __name__ == "__main__":
         ts_per_iteration=100_000,
         exp_buffer_size=300_000,
         ppo_minibatch_size=50_000,
-        ppo_ent_coef=ENT_COEF,
-        policy_lr=POLICY_LR,
-        critic_lr=CRITIC_LR,
         ppo_epochs=2,
         standardize_returns=True,
         standardize_obs=False,
-        save_every_ts=SAVE_EVERY_TS,
-        checkpoints_save_folder=CHECKPOINTS_SAVE_FOLDER,  # verify exact param name -- see module docstring
-        timestep_limit=TIMESTEP_LIMIT,
         log_to_wandb=False,
         render=RENDER,          # slows one env to real-time and pipes it to RLViser -- see module docstring
         render_delay=0,         # seconds between rendered frames; raise this to slow playback down further
+    )
+
+
+if __name__ == "__main__":
+    from rlgym_ppo import Learner
+    from Metrics import TrainingStatsLogger
+
+    # Basic self-play only (both teams mirror the current live policy).
+    # Training against frozen past checkpoints needs rlgym_ppo changes --
+    # see Self_Play.py's module docstring.
+    learner_kwargs = shared_learner_kwargs(N_PROC)
+    learner_kwargs.update(
+        ppo_ent_coef=ENT_COEF,
+        policy_lr=POLICY_LR,
+        critic_lr=CRITIC_LR,
+        save_every_ts=SAVE_EVERY_TS,
+        checkpoints_save_folder=CHECKPOINTS_SAVE_FOLDER,
+        timestep_limit=TIMESTEP_LIMIT,
         # Always passed explicitly (verified against Learner's source):
         # Learner's own default is checkpoint_load_folder="latest", which
         # is NOT the same as "fresh start" -- it makes Learner search
@@ -306,6 +311,11 @@ if __name__ == "__main__":
         # across runs.
         checkpoint_load_folder=CHECKPOINT_LOAD_FOLDER,
     )
+
+    TrainingStatsLogger(
+        STATS_CSV_PATH, RUN_LABEL, n_actions=90, ent_coef=ENT_COEF,
+        policy_lr=POLICY_LR, critic_lr=CRITIC_LR, anneal_timesteps=ANNEAL_TIMESTEPS,
+    ).install()
 
     learner = Learner(build_rlgym_v2_env, **learner_kwargs)
     learner.learn()

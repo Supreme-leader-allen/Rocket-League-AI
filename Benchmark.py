@@ -215,7 +215,7 @@ def pick_device():
     return "cpu", "CPU only"
 
 
-def measure_update(cfg, device, obs_size=212, n_actions=90):
+def measure_update(cfg, device, obs_size=243, n_actions=90):
     import torch
     import torch.nn as nn
 
@@ -283,7 +283,7 @@ def measure_update(cfg, device, obs_size=212, n_actions=90):
     return update_s, total_slices, peak_gib, n_params
 
 
-def measure_inference(cfg, device, n_proc, obs_size=212, n_actions=90):
+def measure_inference(cfg, device, n_proc, obs_size=243, n_actions=90):
     import torch
     import torch.nn as nn
 
@@ -415,8 +415,8 @@ def main():
     if ratio > 1.5:
         print("COLLECTION (CPU side)")
         print(f"    Collection is {ratio:.1f}x the update. Worth doing, in order:")
-        print(f"    1. Fix copy.deepcopy in Observation.py:_masked_state_for -- it is")
-        print(f"       ~80% of step time and the partial-info layer costs {obs_overhead:.1f}x here.")
+        print(f"    1. Profile Observation.py:_masked_state_for -- the partial-info layer")
+        print(f"       costs {obs_overhead:.1f}x here (its deepcopy was removed 2026-09-30).")
         print(f"    2. Add CPU cores. A faster GPU will buy you almost nothing.")
     elif ratio < 0.67:
         print("PPO UPDATE (GPU/compute side)")
@@ -426,7 +426,7 @@ def main():
               f" This changes sample reuse, so it is a")
         print(f"       training tradeoff, not a free win -- see docs/COMPUTE.md.")
         print(f"    2. A faster GPU. Do NOT buy for VRAM: peak use is {peak_gib:.1f} GiB.")
-        print(f"    Optimizing the env / deepcopy first would be wasted work here.")
+        print(f"    Optimizing the env first would be wasted work here.")
     else:
         print("BALANCED")
         print(f"    Collection and update are within 1.5x of each other. Neither")

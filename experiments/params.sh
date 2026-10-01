@@ -9,6 +9,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # =============================================================================
 #   policy/critic layers  [2048, 2048, 1024, 1024]   change -> Model B can't load Model A
 #   zero_padding          4                          change -> observation size breaks
+#   observation size      243 (212 DefaultObs + 31)  change -> every checkpoint is incompatible
 #   team size             4v4                        change -> different research question
 #   action space          full LookupTableAction     change -> "no abstraction" claim dies
 #   GoalReward            10.0, team-shared          this IS the credit-assignment mechanism

@@ -3,6 +3,9 @@
 Known defects, ranked by severity. **Read this before running a training job or
 trusting a result.**
 
+**2026-09-30: new entries added at the top of the table (the policy never
+learned; see that P0 first). Every 2026-08-29 entry remains fixed.**
+
 **Status as of 2026-08-29: every entry below is now FIXED**, each one verified
 by actually running the fix (not just reading the diff — the exact mistake
 that let P0 survive the first time). The original description, reproduction
@@ -44,6 +47,144 @@ execution, not just by reading the corrected code.
 | **P2** | PBT never wired into the experiment matrix | Evolution pillar silently unreachable via `run_all.sh` | **FIXED** |
 | **P2** | `Train_Aerial.py` output mislabeled `model_b_aerial` | `--highlight-label 02_aerial` silently finds nothing | **FIXED** |
 | **P3** | `ANNEAL_SECONDS`, `"latest"`, `Environment.py` | See each entry | **FIXED** |
+| **P0** | The policy never learned anything (2026-09-30) | Both real runs were a random policy | **FIXED** — needs a fresh run |
+| **P1** | Model B's shaping anneal started fully annealed (2026-09-30) | Aerial rewards never applied | **FIXED** |
+| **P2** | Occluded cars leaked rotation, boost, ground state (2026-09-30) | Partial information was partial | **FIXED** |
+| **P2** | Baseline never ran on either real run (2026-09-30) | No comparison possible | **FIXED** |
+| **Gap** | Training against frozen past checkpoints | Self-play is mirror-only | Open — see below |
+
+---
+
+## P0 — The policy never learned anything — **FIXED 2026-09-30 (needs a fresh run)**
+
+### What was observed
+
+Both real runs (300M steps at `ppo_ent_coef=0.01`, then a second run at
+`0.001`) reported Policy Entropy of ~4.4998 from start to finish. That number is
+`ln(90)`: the entropy of an exactly uniform distribution over the 90-action
+`LookupTableAction` table. The trained policy was still a random policy. The
+behavior data says the same thing: `air_time_fraction` ≈ 0.83 and
+`simultaneous_air_rate` ≈ 0.97, which is what uniformly random button-mashing
+over a table dominated by jump actions produces, and what `Run_Baseline.py`'s
+random policy produces (measured: 0.83 air time).
+
+### Why lowering the entropy coefficient could not have been the fix
+
+The earlier diagnosis was "the entropy bonus is swamping the reward signal," so
+`ent_coef` was dropped 0.01 → 0.001. But the gradient of entropy is exactly zero
+at the uniform distribution — the bonus cannot hold a policy there. A policy
+sits at maximum entropy only when the policy-gradient term is also ~zero, i.e.
+the reward gives no consistent signal about which action is better. The second
+run stayed flat at 0.001, consistent with this. `ent_coef` is back to 0.01.
+
+### Root causes, measured by running the environment with random actions
+
+1. **Shaping was ~1000× too weak relative to goals.** The weights were the RLGym
+   quickstart tutorial's (speed-toward-ball 0.01, ball-to-goal 0.1, in-air
+   0.002, goal 10). Measured mean per-step reward: **0.003**, against ±10 per
+   goal. With `standardize_returns`, the return scale is set by goals, so the
+   only gradient was rare goals scored by luck in a game of 8 random cars —
+   pure noise with respect to any one agent's action.
+2. **No touch reward.** Random agents averaged **~2 ball touches per minute**
+   across all 8 cars, with most 30-second episodes having zero. Nothing about
+   shooting, passing, or rotating can be learned before touching is.
+3. **The observation was non-Markov.** `HumanlikeAction` executes each decision
+   3 steps (~200 ms) later, but the observation did not include the 2–3
+   decisions already queued. The policy could not see what it had already
+   committed to, so identical observations were followed by very different
+   futures.
+
+### The fix
+
+- `Rewards.py`: added `TouchBallReward` and `FaceBallReward`; moved every
+  shaping term and weight into `SHAPING_SCHEDULES` (shared by Model A and B so
+  they can't drift). Proportions follow ZealanL's RLGym-PPO-Guide: touch 5.0,
+  speed-toward-ball 0.5, ball-to-goal 1.0, face-ball 0.1, in-air 0.03, goal 10.
+  Measured mean per-step reward is now ~0.075. Liu et al.'s credit-assignment
+  argument is kept: the individual terms anneal to 0 over `ANNEAL_TIMESTEPS`,
+  leaving the team-shared goal plus a small ball-to-goal floor.
+- `Actions.py` / `Observation.py`: the pending-action queue (3 × 8 controls) is
+  appended to every observation.
+- `Train_Ground.py` / `Train_Aerial.py` / `Pbt.py`: `ent_coef` back to 0.01.
+
+**The observation is now 243 wide, not 212.** Every existing checkpoint (212
+input) is incompatible and the next run must start fresh. That was accepted
+because those checkpoints were random policies — nothing was lost. From here,
+the "fixed network" rule applies again: don't change the observation, action
+space, or layer sizes without accepting another fresh start.
+
+### Verified by execution
+
+- Environment probe (random actions, 3000 steps): observation shape (8, 243);
+  mean per-step reward 0.003 before → 0.075 after.
+- Masking unit test against a live 4v4 state, all 8 agents on both teams:
+  unknown cars come through fully blank, visible cars carry their real
+  rotation in the acting car's frame, staleness flags match the view-cone
+  geometry, pending-action features match `HumanlikeAction`'s queue.
+- `Run_Baseline.py --workers 6`: all episodes flushed to CSV.
+- `Self_Play.evaluate_match` with two 243-input policies: completes.
+- Real `Train_Ground.py`, full-size network, `n_proc=8`, CPU only (~300 SPS),
+  600k steps. `entropy_fraction_of_max` per iteration:
+  0.99996 → 0.99993 → 0.99980 → 0.99920 → 0.99823 → 0.99786, with KL rising
+  from 4e-6 to 3e-3 and clip fraction leaving 0. The old 300M-step run never
+  went below 0.99997. Episode behavior (touches, air time) had not changed yet
+  at 600k — expected that early, and too slow to watch on a CPU-only machine.
+  That is the next run's job.
+
+### What to check on the next run
+
+Open `metrics/<run>_training_stats.csv` (or `plots/training_stats.png`) first.
+`entropy_fraction_of_max` must fall visibly below 1.0 within the first few tens
+of millions of steps, and `touches_per_minute` in the episode CSV must climb
+well above the baseline's ~2. If either stays flat, stop the run — nothing
+downstream (coordination included) can emerge from a policy that hasn't left
+uniform.
+
+## P1 — Model B's shaping anneal started fully annealed — **FIXED 2026-09-30**
+
+`Train_Aerial.py` annealed over a fixed 200M-step budget but seeded
+`initial_timesteps` with Model A's cumulative count. Any Model A trained past
+200M (the planned 300M run) gave progress = 300M / 200M → clamped to 1.0 on
+Model B's first step, so the raised `InAirReward` weight that is the whole point
+of Model B was never applied. Model B's anneal now runs over its own steps
+(`initial_timesteps=0`, `TrainingStatsLogger` offset by Model A's count).
+
+## P2 — Occluded cars leaked rotation, boost, and ground state — **FIXED 2026-09-30**
+
+`PartialInfoObs` only overwrote `position` and `linear_velocity` of cars out of
+view. Their live orientation (`forward`/`up`), angular velocity, boost amount,
+on-ground, boosting, and supersonic flags still reached the policy. Remembered
+cars are now a frozen copy of the whole `Car` at its last sighting; forgotten
+or never-seen cars are blank (zero physics and rotation, no boost). Memory now
+works in the true frame and clears each copy's `_inverted_physics` cache, so
+there is no per-car frame choice left that could disagree with `DefaultObs`
+(the P0 class of bug below). A per-car staleness flag (0 = visible → 1 =
+unknown) is appended, because a forgotten car's zeroed position is the field
+centre, a legal place for a car to be. The per-agent `copy.deepcopy(state)` was
+replaced by copying only what is masked: measured env throughput went from 135
+to 252 steps/s on one process.
+
+## P2 — The random baseline never ran — **FIXED 2026-09-30**
+
+`exp.sh` runs only `01_ground.sh` by default, and `00_baseline.sh` asked for
+`ROUND*2` episodes in a single process (6000 episodes ≈ 5+ hours at
+`ROUND=3000`), so neither real run had a baseline and every `*_vs_baseline`
+plot showed one condition. `Run_Baseline.py` now runs episodes across
+`--workers` processes, `00_baseline.sh` caps it at 400 episodes, and
+`01_ground.sh` runs the baseline automatically when `$OUT/metrics` has none.
+
+## Gap — Training against frozen past checkpoints — **OPEN**
+
+Self-play is mirror-only: both teams are the live policy. The checkpoint-pool
+autocurriculum in `ROADMAP.md` (Liu et al. train against a population) would
+need orange's actions to come from a frozen checkpoint, AND those agents'
+transitions to be dropped from PPO's experience — otherwise PPO learns from
+actions its own policy didn't choose, with wrong log-probabilities. Neither is
+possible through `rlgym_ppo.Learner`'s public interface; it needs a fork of its
+batched-agent collection. `Self_Play.FrozenPolicy` / `evaluate_match` work and
+are used for PBT's cross-play fitness; they are just not in the training loop.
+Mirror self-play is what Necto/Nexto started from, so this does not block
+learning — it matters for robustness later.
 
 ---
 
@@ -709,7 +850,9 @@ boxplot) generate correctly with the intended labels throughout, no
   with P0 fixed, that cost now actually buys the partial-information layer it
   was always meant to buy, rather than partly paying for masking that got
   discarded. Still not worth optimizing first — see `COMPUTE.md`'s bottleneck
-  guidance and run `Benchmark.py` before touching it.
+  guidance and run `Benchmark.py` before touching it. **Update, 2026-09-30:**
+  the deepcopy is gone anyway (see the P2 on occluded cars above), as a side
+  effect of masking whole cars.
 
 ## What to fix before spending money on a run
 

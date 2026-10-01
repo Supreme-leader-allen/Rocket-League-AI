@@ -42,6 +42,19 @@ Verified against the installed rlgym.rocket_league.action_parsers.LookupTableAct
   docstring specifies ("(ticks, actiondim=8)"), and this is fed straight
   to RocketSimEngine rather than through a separate RepeatAction, so no
   double-repeat risk.
+
+Pending actions are published to the observation (added 2026-09-30, see
+docs/ISSUES.md "P0 -- the policy never learned"). With a 3-step delay the
+action chosen at step t only executes at t+3, so the two decisions already
+queued ahead of it are part of the true state. Without them the policy is
+choosing blind: the same observation can be followed by any of 90^3
+already-committed futures, which is a non-Markov problem PPO handles badly.
+parse_actions (and reset) write the queued-but-not-yet-executed decisions,
+as their 8-dim control rows, to shared_info["pending_controls"][agent];
+Observation.PartialInfoObs appends them to every observation. RLGym.step
+calls parse_actions before build_obs, and RLGym.reset calls
+action_parser.reset before build_obs (both confirmed against
+rlgym.api.rlgym's source), so the entry is always current when read.
 """
 
 from collections import deque
@@ -76,18 +89,28 @@ class HumanlikeAction(ActionParser[AgentID, int, np.ndarray, GameState, int]):
     def reset(self, agents: List[AgentID], initial_state: GameState, shared_info: Dict[str, Any]) -> None:
         self._table_parser.reset(agents, initial_state, shared_info)
         self._queues.clear()
+        idle_controls = self._table_parser._lookup_table[int(self._idle_action_index[0])]
+        shared_info["pending_controls"] = {
+            agent: np.tile(idle_controls, (self._delay_steps, 1)) for agent in agents
+        }
 
     def parse_actions(self, actions: Dict[AgentID, int], state: GameState,
                        shared_info: Dict[str, Any]) -> Dict[AgentID, np.ndarray]:
         delayed_indices = {}
+        pending = shared_info.setdefault("pending_controls", {})
+        table = self._table_parser._lookup_table
         for agent, action in actions.items():
             queue = self._queues.setdefault(
                 agent,
                 deque([self._idle_action_index] * self._delay_steps, maxlen=self._delay_steps + 1),
             )
-            queue.append(action)
+            # copy: the queue outlives this call, so it must not alias a
+            # caller-owned buffer that could be overwritten next step
+            queue.append(np.array(action, dtype=np.int32).reshape(-1))
             # oldest entry in the queue is the decision that actually executes now
             delayed_indices[agent] = queue[0]
+            # everything behind it is committed but not yet executed
+            pending[agent] = table[[int(np.asarray(a).reshape(-1)[0]) for a in list(queue)[1:]]]
 
         parsed = self._table_parser.parse_actions(delayed_indices, state, shared_info)
 
