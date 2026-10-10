@@ -51,9 +51,45 @@ execution, not just by reading the corrected code.
 | **P1** | Model B's shaping anneal started fully annealed (2026-09-30) | Aerial rewards never applied | **FIXED** |
 | **P2** | Occluded cars leaked rotation, boost, ground state (2026-09-30) | Partial information was partial | **FIXED** |
 | **P2** | Baseline never ran on either real run (2026-09-30) | No comparison possible | **FIXED** |
+| **P0** | Shaping annealed to zero un-learned everything (2026-10-10) | Run 3 learned, then reverted to random | **FIXED** — needs a fresh run |
 | **Gap** | Training against frozen past checkpoints | Self-play is mirror-only | Open — see below |
 
 ---
+
+## P0 — Shaping annealed to zero un-learned everything — **FIXED 2026-10-10 (needs a fresh run)**
+
+The first full run on the 2026-09-30 fixes (300M steps, RunPod, ~23k SPS)
+learned for real and then lost all of it. From `01_ground_training_stats.csv`
+and the episode CSVs, binned by timesteps:
+
+| Steps | Touches/min | Air time | Entropy / max | Shaping annealed |
+| --- | --- | --- | --- | --- |
+| baseline (random) | 2.5 | 0.83 | 1.00 | – |
+| 23–72M | 35.6 | 0.37 | ~0.93 | 24% |
+| 72–119M (peak) | 46.3 | 0.35 | ~0.93 | 48% |
+| 120–170M | 39.6 | 0.59 | 0.95 → 0.98 | 72% |
+| 170–201M | 9.6 | 0.81 | 0.99 → 1.00 | 94% |
+| 201–300M | ~3 | 0.83 | 1.00 | 100% |
+
+The decline tracks the anneal, not training time: it begins once the individual
+terms are ~70% annealed and reaches the random baseline exactly when they hit
+zero. With only the team-shared goal (+ a 0.2 ball-to-goal floor) left, a goal
+in 4v4 is too rare and too shared across 8 cars to carry per-agent signal; the
+entropy bonus, which has a real gradient once the policy is off uniform, then
+pulls it back to uniform. Liu et al. annealed to zero in 2v2 with far more
+training; at this budget in 4v4 that measurably fails. This is a reportable
+result in its own right, and the 23M–170M segment of this run is valid
+learned-behavior data.
+
+**Fix:** `Rewards.SHAPING_SCHEDULES` now anneals the individual terms (touch,
+speed, face, air) only to 50% of their starting weight, and does not anneal
+ball-to-goal velocity at all (1.0 throughout). That term is identical for every
+agent on a team, so it is a team-shared reward in Liu et al.'s credit-assignment
+sense, just dense enough to learn from. Not yet verified by a run.
+
+**What to check on the next run:** touches/min should rise as before and then
+*stay* well above the baseline after 200M (shaping_progress = 1.0), and
+`entropy_fraction_of_max` should not climb back toward 1.0.
 
 ## P0 — The policy never learned anything — **FIXED 2026-09-30 (needs a fresh run)**
 

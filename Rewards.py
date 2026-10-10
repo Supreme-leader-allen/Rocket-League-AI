@@ -136,26 +136,40 @@ class FaceBallReward(RewardFunction[AgentID, GameState, float]):
 # early, approach/orientation terms make touching discoverable, and a
 # little InAirReward keeps the bot from unlearning jump.
 #
-# Liu et al.'s credit-assignment argument is preserved: the individual
-# terms (touch, speed, face, air) anneal to ~0 so the team-shared goal is
-# what remains, and ball-to-goal velocity -- objective-aligned and not
-# individually exploitable -- keeps a small floor.
+# Fading to a floor, not to zero (changed 2026-10-10, docs/ISSUES.md "P0 --
+# shaping annealed to zero un-learned everything"). The first 300M-step run
+# on these terms learned for real -- touches/min 2.5 (random) -> 46, air time
+# 0.83 -> 0.35, entropy down to 0.93 of max -- then collapsed back to
+# exactly the random baseline in step with the anneal: decline began once
+# shaping was ~70% annealed, and by 200M (fully annealed) behavior and
+# entropy were both back to random. With only the team-shared goal left, a
+# 4v4 goal is too rare and too diluted across 8 cars to carry any per-agent
+# signal, and the entropy bonus then pulls the policy back to uniform.
+#
+# So the individual terms (touch, speed, face, air) now anneal only to 50%
+# of their starting weight -- the collapse began around 30%. Ball-to-goal
+# velocity is NOT annealed: it is identical for every agent on a team, so
+# it is a team-shared reward in exactly Liu et al.'s credit-assignment
+# sense, just dense enough to learn from. Liu et al. annealed to zero, but
+# in 2v2 with far more training; at this budget in 4v4 that measurably
+# fails, and experiments/04_no_anneal.sh remains the ablation for whether
+# annealing matters at all.
 SHAPING_SCHEDULES = {
     "ground": [
-        (TouchBallReward, 5.0, 0.0),
-        (SpeedTowardBallReward, 0.5, 0.0),
-        (FaceBallReward, 0.1, 0.0),
-        (VelocityBallToGoalReward, 1.0, 0.2),
-        (InAirReward, 0.03, 0.0),
+        (TouchBallReward, 5.0, 2.5),
+        (SpeedTowardBallReward, 0.5, 0.25),
+        (FaceBallReward, 0.1, 0.05),
+        (VelocityBallToGoalReward, 1.0, 1.0),
+        (InAirReward, 0.03, 0.015),
     ],
     # Model B: warm-started from Model A, so touching is already learned;
     # aerial play is new and gets dense InAirReward guidance again.
     "aerial": [
-        (TouchBallReward, 2.0, 0.0),
-        (SpeedTowardBallReward, 0.2, 0.0),
-        (FaceBallReward, 0.05, 0.0),
-        (VelocityBallToGoalReward, 1.0, 0.2),
-        (InAirReward, 0.2, 0.02),
+        (TouchBallReward, 2.5, 2.5),
+        (SpeedTowardBallReward, 0.25, 0.25),
+        (FaceBallReward, 0.05, 0.05),
+        (VelocityBallToGoalReward, 1.0, 1.0),
+        (InAirReward, 0.2, 0.05),
     ],
 }
 
