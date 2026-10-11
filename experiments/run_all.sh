@@ -22,7 +22,7 @@ source "$HERE/params.sh"
 CORE_ONLY="${CORE_ONLY:-0}"
 INCLUDE_PBT="${INCLUDE_PBT:-0}"
 EXPERIMENTS=(00_baseline.sh 01_ground.sh 02_aerial.sh)
-[ "$CORE_ONLY" = "1" ] || EXPERIMENTS+=(03_full_info.sh 04_no_anneal.sh 05_aux_encoder.sh)
+[ "$CORE_ONLY" = "1" ] || EXPERIMENTS+=(03_full_info.sh 04_no_anneal.sh 05_aux_encoder.sh 07_no_team_spirit.sh)
 [ "$INCLUDE_PBT" != "1" ] || EXPERIMENTS+=(06_pbt.sh)
 
 echo "output -> $OUT"

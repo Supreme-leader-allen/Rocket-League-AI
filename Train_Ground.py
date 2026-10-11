@@ -108,6 +108,15 @@ STATS_CSV_PATH = os.environ.get("PBT_STATS_CSV_PATH") or     os.path.splitext(CS
 # <=0 as "already fully annealed", which is the opposite of "never
 # anneal" -- use a huge value, not 0, for that ablation.
 ANNEAL_TIMESTEPS = float(os.environ.get("ANNEAL_TIMESTEPS", 200_000_000))
+# Team spirit (Rewards.AnnealedCombinedReward): blends each car's shaping
+# reward with its team's average, ramping START -> FINAL over
+# TEAM_SPIRIT_TIMESTEPS. Starts individual so the bot can learn to touch
+# the ball, ends mostly team-shared so it stops being paid for beating its
+# own teammates to the ball (run 3's ball-chasing -- docs/ISSUES.md).
+# TEAM_SPIRIT_FINAL=0 turns it off: experiments/07_no_team_spirit.sh.
+TEAM_SPIRIT_START = float(os.environ.get("TEAM_SPIRIT_START", 0.0))
+TEAM_SPIRIT_FINAL = float(os.environ.get("TEAM_SPIRIT_FINAL", 0.8))
+TEAM_SPIRIT_TIMESTEPS = float(os.environ.get("TEAM_SPIRIT_TIMESTEPS", 200_000_000))
 
 
 def build_rlgym_v2_env(run_label: str = None, csv_path: str = None, fitness_csv_path: str = None):
@@ -177,7 +186,10 @@ def build_rlgym_v2_env(run_label: str = None, csv_path: str = None, fitness_csv_
     # Terms and weights live in Rewards.SHAPING_SCHEDULES so Model A and
     # Model B can't silently drift apart -- see the comment there for why
     # they were rebalanced.
-    shaping = build_shaping("ground", ANNEAL_TIMESTEPS, N_PROC, initial_timesteps)
+    shaping = build_shaping(
+        "ground", ANNEAL_TIMESTEPS, N_PROC, initial_timesteps,
+        team_spirit=(TEAM_SPIRIT_START, TEAM_SPIRIT_FINAL, TEAM_SPIRIT_TIMESTEPS),
+    )
     # Zero-weight -- pure data collection, no effect on training. See
     # metrics.py for what each column means and why overcommit_rate /
     # simultaneous_air_rate were added on top of your original metric list.

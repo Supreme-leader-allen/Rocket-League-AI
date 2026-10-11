@@ -52,9 +52,37 @@ execution, not just by reading the corrected code.
 | **P2** | Occluded cars leaked rotation, boost, ground state (2026-09-30) | Partial information was partial | **FIXED** |
 | **P2** | Baseline never ran on either real run (2026-09-30) | No comparison possible | **FIXED** |
 | **P0** | Shaping annealed to zero un-learned everything (2026-10-10) | Run 3 learned, then reverted to random | **FIXED** — needs a fresh run |
+| **Change** | Team spirit added (2026-10-11) | Targets run 3's ball-chasing | Not yet run |
 | **Gap** | Training against frozen past checkpoints | Self-play is mirror-only | Open — see below |
 
 ---
+
+## Change — Team spirit, to target ball-chasing — **added 2026-10-11, not yet run**
+
+Run 3's peak behavior (50–125M steps) was ball-chasing, not coordination:
+overcommit rate 0.28 vs 0.005 for random, teammate spacing ~1,500 vs ~4,400 uu,
+depth spread ~700 vs ~2,200 uu, goal-side rate 0.75 vs 0.93, while scoring in
+96–97% of episodes. Touch and speed-to-ball pay the individual car that reaches
+the ball, so all four racing for it is what they reward. Annealing them to zero
+removes that incentive but, as the P0 below shows, also collapses learning.
+
+`Rewards.AnnealedCombinedReward` now blends each car's shaping reward with its
+team's average (OpenAI Five's "team spirit"):
+`r_i' = (1 - tau) * r_i + tau * team_mean(r)`, with tau ramping 0 → 0.8 over
+`TEAM_SPIRIT_TIMESTEPS` (200M). The reward stays dense, but a car earns nearly
+the same whether it or a teammate makes the touch. Env vars `TEAM_SPIRIT_START`,
+`TEAM_SPIRIT_FINAL`, `TEAM_SPIRIT_TIMESTEPS`; the episode CSV gains a
+`team_spirit` column. `experiments/07_no_team_spirit.sh` is the ablation
+(identical run with tau = 0), included in `run_all.sh` without `CORE_ONLY`.
+
+Verified: with tau = 1, within-team reward spread is exactly 0 on every step of
+a 1,500-step random rollout; with tau = 0 it reaches 5.3.
+
+**What to check on the next run:** the same learning as run 3 early on, no
+collapse after 200M, and, as tau rises, overcommit rate falling and teammate
+spacing, depth spread and goal-side rate rising back toward or past the
+baseline *while* scoring stays high. If coordination metrics don't move, run
+`07_no_team_spirit.sh` to see whether team spirit changed anything at all.
 
 ## P0 — Shaping annealed to zero un-learned everything — **FIXED 2026-10-10 (needs a fresh run)**
 

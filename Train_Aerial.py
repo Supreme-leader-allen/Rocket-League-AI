@@ -185,7 +185,11 @@ def build_rlgym_v2_env():
     #
     # Annealed over Model B's own timesteps (initial_timesteps=0) -- see
     # ANNEAL_TIMESTEPS above for why not Model A's.
-    shaping = build_shaping("aerial", ANNEAL_TIMESTEPS, N_PROC, 0.0)
+    # Team spirit held at Model A's final value from the start -- Model B
+    # inherits Model A's team play rather than re-learning it.
+    from Train_Ground import TEAM_SPIRIT_FINAL
+    shaping = build_shaping("aerial", ANNEAL_TIMESTEPS, N_PROC, 0.0,
+                            team_spirit=(TEAM_SPIRIT_FINAL, TEAM_SPIRIT_FINAL, 1.0))
     coordination_metrics = CoordinationMetrics(
         csv_path=CSV_PATH, run_label=RUN_LABEL,
         n_proc=N_PROC, initial_timesteps=LOADED_TIMESTEPS,

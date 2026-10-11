@@ -174,13 +174,18 @@ SHAPING_SCHEDULES = {
 }
 
 
-def build_shaping(phase: str, anneal_timesteps: float, n_proc: int, initial_timesteps: float):
-    """AnnealedCombinedReward for `phase` ("ground" or "aerial")."""
+def build_shaping(phase: str, anneal_timesteps: float, n_proc: int, initial_timesteps: float,
+                  team_spirit: Tuple[float, float, float] = (0.0, 0.0, 1.0)):
+    """AnnealedCombinedReward for `phase` ("ground" or "aerial").
+    team_spirit = (start, final, ramp_timesteps) -- see AnnealedCombinedReward."""
     return AnnealedCombinedReward(
         weighted_rewards=[(cls(), w0, w1) for cls, w0, w1 in SHAPING_SCHEDULES[phase]],
         anneal_timesteps=anneal_timesteps,
         n_proc=n_proc,
         initial_timesteps=initial_timesteps,
+        team_spirit_start=team_spirit[0],
+        team_spirit_final=team_spirit[1],
+        team_spirit_timesteps=team_spirit[2],
     )
 
 
@@ -226,12 +231,41 @@ class AnnealedCombinedReward(RewardFunction[AgentID, GameState, float]):
 
     Terms with initial_weight == final_weight (e.g. GoalReward, passed
     with no annealing) are just held constant.
+
+    Team spirit (added 2026-10-11, docs/ISSUES.md "Team spirit"). After the
+    weighted sum, each agent's shaping reward is blended with its team's
+    average:
+
+        r_i' = (1 - tau) * r_i + tau * mean_{j on i's team}(r_j)
+
+    tau ramps linearly from team_spirit_start to team_spirit_final over
+    team_spirit_timesteps (same estimated-timestep clock as the anneal, but
+    its own budget, so experiments/04_no_anneal.sh can freeze the anneal
+    without also freezing team spirit). This is OpenAI Five's mechanism.
+
+    Why: run 3 learned to score in 97% of episodes, but by ball-chasing --
+    overcommit rate 0.28 vs 0.005 random, teammate spacing 1500 vs 4400 uu,
+    nobody goal-side 25% of the time. Touch and speed-to-ball pay the car
+    that gets to the ball, so four cars racing for it is exactly what they
+    reward. At tau = 1 a car earns the same whether it or a teammate makes
+    the touch, so there is no reason to fight a teammate for the ball, but
+    the reward stays dense -- unlike annealing the shaping away, which run 3
+    showed collapses learning. Starting at tau = 0 keeps individual credit
+    while the bot is still learning to touch the ball at all.
+
+    Terms that are already identical across a team (ball-to-goal velocity)
+    are unchanged by the blend. Goal reward is outside this class.
     """
 
     def __init__(self, weighted_rewards: Sequence[Tuple[RewardFunction, float, float]],
-                 anneal_timesteps: float, n_proc: int = 1, initial_timesteps: float = 0.0):
+                 anneal_timesteps: float, n_proc: int = 1, initial_timesteps: float = 0.0,
+                 team_spirit_start: float = 0.0, team_spirit_final: float = 0.0,
+                 team_spirit_timesteps: float = 1.0):
         super().__init__()
         self._entries = list(weighted_rewards)
+        self._ts_start = team_spirit_start
+        self._ts_final = team_spirit_final
+        self._ts_timesteps = team_spirit_timesteps
         self._anneal_timesteps = anneal_timesteps
         self._n_proc = max(1, n_proc)
         self._initial_timesteps = initial_timesteps
@@ -241,11 +275,17 @@ class AnnealedCombinedReward(RewardFunction[AgentID, GameState, float]):
         for reward_fn, _, _ in self._entries:
             reward_fn.reset(agents, initial_state, shared_info)
 
+    def _estimated_cumulative(self) -> float:
+        return self._initial_timesteps + self._local_agent_steps * self._n_proc
+
     def _current_progress(self) -> float:
         if self._anneal_timesteps <= 0:
             return 1.0
-        estimated_cumulative = self._initial_timesteps + self._local_agent_steps * self._n_proc
-        return min(1.0, estimated_cumulative / self._anneal_timesteps)
+        return min(1.0, self._estimated_cumulative() / self._anneal_timesteps)
+
+    def _current_team_spirit(self) -> float:
+        ramp = 1.0 if self._ts_timesteps <= 0 else min(1.0, self._estimated_cumulative() / self._ts_timesteps)
+        return self._ts_start + (self._ts_final - self._ts_start) * ramp
 
     def get_rewards(self, agents: List[AgentID], state: GameState, is_terminated: Dict[AgentID, bool],
                      is_truncated: Dict[AgentID, bool], shared_info: Dict[str, Any]) -> Dict[AgentID, float]:
@@ -260,6 +300,21 @@ class AnnealedCombinedReward(RewardFunction[AgentID, GameState, float]):
             per_agent = reward_fn.get_rewards(agents, state, is_terminated, is_truncated, shared_info)
             for agent in agents:
                 totals[agent] += weight * per_agent[agent]
+
+        tau = self._current_team_spirit()
+        shared_info["team_spirit"] = tau
+        if tau > 0:
+            team_sum: Dict[int, float] = {}
+            team_n: Dict[int, int] = {}
+            for agent in agents:
+                team = state.cars[agent].team_num
+                team_sum[team] = team_sum.get(team, 0.0) + totals[agent]
+                team_n[team] = team_n.get(team, 0) + 1
+            totals = {
+                agent: (1 - tau) * totals[agent]
+                + tau * team_sum[state.cars[agent].team_num] / team_n[state.cars[agent].team_num]
+                for agent in agents
+            }
 
         self._local_agent_steps += len(agents)
         return totals

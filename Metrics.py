@@ -68,6 +68,7 @@ which is what "roles emerged" actually means:
 - episode_outcome: "blue", "orange" or "timeout".
 - shaping_progress: AnnealedCombinedReward's anneal fraction (0 -> 1) at
   the episode's end, so each row can be placed on the shaping schedule.
+- team_spirit: the team-spirit blend (tau) at the episode's end.
 
 Output: one CSV row per completed episode. IMPORTANT: rlgym_ppo runs
 n_proc separate environment processes in parallel, and build_rlgym_v2_env
@@ -109,6 +110,7 @@ CSV_COLUMNS = [
     "goal_side_rate", "first_man_changes_per_minute",
     "depth_spread", "boost_first_minus_last",
     "avg_speed", "supersonic_fraction",
+    "team_spirit",
 ]
 
 STEPS_PER_MINUTE = 15 * 60  # 120 Hz physics / 8-tick action repeat = 15 decisions/sec
@@ -167,7 +169,7 @@ class CoordinationMetrics(RewardFunction[AgentID, GameState, float]):
             "goal_side": [], "depth_spread": [], "boost_first_last": [],
             "speed": [], "supersonic": [],
             "first_man_changes": 0, "touches": {},
-            "outcome": "timeout", "shaping_progress": "", "team_sizes": {},
+            "outcome": "timeout", "shaping_progress": "", "team_spirit": "", "team_sizes": {},
         }
         self._prev_first_man = {}
 
@@ -176,6 +178,8 @@ class CoordinationMetrics(RewardFunction[AgentID, GameState, float]):
         self._record_step(agents, state)
         if "shaping_progress" in shared_info:
             self._buffers["shaping_progress"] = shared_info["shaping_progress"]
+        if "team_spirit" in shared_info:
+            self._buffers["team_spirit"] = shared_info["team_spirit"]
         # Same accumulation rule as AnnealedCombinedReward: advances by the
         # agent count each get_rewards() call, not by 1 -- confirmed
         # against rlgym_ppo's BatchedAgentManager source (see Rewards.py).
@@ -294,6 +298,7 @@ class CoordinationMetrics(RewardFunction[AgentID, GameState, float]):
             b["first_man_changes"] / minutes if minutes > 0 else "",
             avg("depth_spread"), avg("boost_first_last"),
             avg("speed"), avg("supersonic"),
+            b["team_spirit"],
         ]
         with open(self.csv_path, "a", newline="") as f:
             csv.writer(f).writerow(row)
