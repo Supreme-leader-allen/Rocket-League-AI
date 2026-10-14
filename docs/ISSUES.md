@@ -52,7 +52,7 @@ execution, not just by reading the corrected code.
 | **P2** | Occluded cars leaked rotation, boost, ground state (2026-09-30) | Partial information was partial | **FIXED** |
 | **P2** | Baseline never ran on either real run (2026-09-30) | No comparison possible | **FIXED** |
 | **P0** | Shaping annealed to zero un-learned everything (2026-10-10) | Run 3 learned, then reverted to random | **FIXED** — needs a fresh run |
-| **Change** | Team spirit added (2026-10-11) | Targets run 3's ball-chasing | Not yet run |
+| **Change** | Team spirit added (2026-10-11) | Targets run 3's ball-chasing | Run 4: no collapse; coordination confounded — run 07 |
 | **Gap** | Training against frozen past checkpoints | Self-play is mirror-only | Open — see below |
 
 ---
@@ -77,6 +77,19 @@ the same whether it or a teammate makes the touch. Env vars `TEAM_SPIRIT_START`,
 
 Verified: with tau = 1, within-team reward spread is exactly 0 on every step of
 a 1,500-step random rollout; with tau = 0 it reaches 5.3.
+
+**Run 4 result (2026-10-14, 300M steps, floor anneal + team spirit 0 → 0.8).**
+The collapse is fixed: scoring stayed at 94–96% of episodes and touches at
+31–35/min through 300M (run 3: 10% and 3/min). From the ball-chasing peak
+(50–75M, tau 0.25) to the end (250–300M, tau 0.8): overcommit 0.30 → 0.14,
+teammate spacing 1,434 → 2,340 uu, depth spread 684 → 1,144 uu, first-man
+changes 61 → 45/min. Goal-side rate did not move (0.75 → 0.77; random 0.92).
+**Confound:** over the same span entropy rose 0.92 → 0.97 and air time
+0.24 → 0.65 (random 0.83), so part of the spreading may be the policy getting
+less sharp, not coordinating -- a more random team also spreads out. Before 150M
+run 3 and run 4 are near-identical (team spirit < 0.55 changed nothing visible
+there). `07_no_team_spirit.sh` is needed to attribute the spreading to team
+spirit rather than to the anneal and rising entropy.
 
 **What to check on the next run:** the same learning as run 3 early on, no
 collapse after 200M, and, as tau rises, overcommit rate falling and teammate
