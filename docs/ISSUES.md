@@ -52,7 +52,7 @@ execution, not just by reading the corrected code.
 | **P2** | Occluded cars leaked rotation, boost, ground state (2026-09-30) | Partial information was partial | **FIXED** |
 | **P2** | Baseline never ran on either real run (2026-09-30) | No comparison possible | **FIXED** |
 | **P0** | Shaping annealed to zero un-learned everything (2026-10-10) | Run 3 learned, then reverted to random | **FIXED** — needs a fresh run |
-| **Change** | Team spirit added (2026-10-11) | Targets run 3's ball-chasing | Run 4: no collapse; coordination confounded — run 07 |
+| **Change** | Team spirit added (2026-10-11) | Targets run 3's ball-chasing | Run 4 + 07 ablation: team spirit reduces clumping, at a mechanical cost |
 | **Gap** | Training against frozen past checkpoints | Self-play is mirror-only | Open — see below |
 
 ---
@@ -90,6 +90,21 @@ less sharp, not coordinating -- a more random team also spreads out. Before 150M
 run 3 and run 4 are near-identical (team spirit < 0.55 changed nothing visible
 there). `07_no_team_spirit.sh` is needed to attribute the spreading to team
 spirit rather than to the anneal and rising entropy.
+
+**Ablation result (2026-10-15, `07_no_team_spirit`, 300M steps, same anneal,
+tau = 0).** Without team spirit the team stays clumped: at 250–300M, overcommit
+0.27 vs 0.14 with team spirit, spacing 1,723 vs 2,340 uu, depth spread 813 vs
+1,144 uu, first-man changes 58 vs 45/min. So the anneal alone does not produce
+the spreading. The no-team-spirit run is mechanically sharper -- touches 63 vs
+35/min, air time 0.47 vs 0.65, scoring 98% vs 96%, entropy ~0.93 vs ~0.97 -- so
+the loosening seen in run 4 is itself a cost of team spirit (diluted per-car
+credit), not of the anneal. Holding air time fixed (episodes after 150M, OLS
+with air time as covariate, and matched air-time bands 0.40–0.55), team spirit
+still adds ~+310 uu spacing, ~+160 uu depth spread and ~-0.06 overcommit:
+roughly half the raw difference is beyond what the looser policy explains.
+Goal-side rate is ~0.76 in both -- neither learned to keep a defender back.
+One seed per condition; per-episode p-values are not independent samples and
+should not be reported as the test of the hypothesis.
 
 **What to check on the next run:** the same learning as run 3 early on, no
 collapse after 200M, and, as tau rises, overcommit rate falling and teammate
