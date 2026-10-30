@@ -75,6 +75,22 @@ CRITIC_LR = float(os.environ.get("PBT_CRITIC_LR", 1e-4))
 # gradient, 0.01 is what keeps the policy from collapsing early onto the
 # first behavior that works.
 ENT_COEF = float(os.environ.get("PBT_ENT_COEF", 0.01))
+# Entropy schedule: ENT_COEF -> ENT_COEF * ENT_COEF_FINAL_FRACTION over
+# ENT_COEF_TIMESTEPS, applied by Metrics.TrainingStatsLogger. Added because
+# team spirit cost mechanical skill (touches 35 vs 63/min, air time 0.65 vs
+# 0.47, entropy 0.97 vs 0.93 of max at 250-300M, run 4 vs the 07 ablation).
+# Blending in teammates' rewards adds reward a car can't control, so each
+# car's own actions explain less of its return. That can't be fixed by
+# rescaling the reward, since standardize_returns cancels any constant
+# scale. What it does change is the balance against the entropy bonus, which
+# once the policy is off uniform pulls it back toward random -- and the
+# action table is dominated by jump actions, hence the air time. So the
+# bonus falls as team spirit rises, over the same 200M. A fraction rather
+# than an absolute value so PBT's mutated ENT_COEF still scales. Set
+# ENT_COEF_FINAL_FRACTION=1 for the old constant behavior. Not yet verified
+# by a full run.
+ENT_COEF_FINAL_FRACTION = float(os.environ.get("ENT_COEF_FINAL_FRACTION", 0.2))
+ENT_COEF_TIMESTEPS = float(os.environ.get("ENT_COEF_TIMESTEPS", 200_000_000))
 N_PROC = int(os.environ.get("PBT_N_PROC", 32))
 CHECKPOINTS_SAVE_FOLDER = os.environ.get("PBT_CHECKPOINT_DIR", "checkpoints/model_a_ground")
 CHECKPOINT_LOAD_FOLDER = os.environ.get("PBT_CHECKPOINT_LOAD_DIR") or None
@@ -324,10 +340,14 @@ if __name__ == "__main__":
         checkpoint_load_folder=CHECKPOINT_LOAD_FOLDER,
     )
 
-    TrainingStatsLogger(
+    stats_logger = TrainingStatsLogger(
         STATS_CSV_PATH, RUN_LABEL, n_actions=90, ent_coef=ENT_COEF,
         policy_lr=POLICY_LR, critic_lr=CRITIC_LR, anneal_timesteps=ANNEAL_TIMESTEPS,
-    ).install()
+        ent_coef_final=ENT_COEF * ENT_COEF_FINAL_FRACTION,
+        ent_coef_timesteps=ENT_COEF_TIMESTEPS,
+    )
+    stats_logger.install()
 
     learner = Learner(build_rlgym_v2_env, **learner_kwargs)
+    stats_logger.attach(learner)
     learner.learn()

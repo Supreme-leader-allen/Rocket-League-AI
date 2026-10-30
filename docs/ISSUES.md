@@ -52,10 +52,44 @@ execution, not just by reading the corrected code.
 | **P2** | Occluded cars leaked rotation, boost, ground state (2026-09-30) | Partial information was partial | **FIXED** |
 | **P2** | Baseline never ran on either real run (2026-09-30) | No comparison possible | **FIXED** |
 | **P0** | Shaping annealed to zero un-learned everything (2026-10-10) | Run 3 learned, then reverted to random | **FIXED** — needs a fresh run |
+| **Change** | Entropy schedule to recover team spirit's skill loss (2026-10-30) | Run 4 lost mechanical skill | Not yet run |
 | **Change** | Team spirit added (2026-10-11) | Targets run 3's ball-chasing | Run 4 + 07 ablation: team spirit reduces clumping, at a mechanical cost |
 | **Gap** | Training against frozen past checkpoints | Self-play is mirror-only | Open — see below |
 
 ---
+
+## Change — Entropy schedule, to recover team spirit's skill loss — **added 2026-10-30, not yet run**
+
+At 250–300M, team spirit (run 4) played measurably worse mechanically than the
+no-team-spirit ablation: touches 35 vs 63/min, air time 0.65 vs 0.47, entropy
+0.97 vs 0.93 of max, scoring 96% vs 98%.
+
+**Likely mechanism (inferred, not proven).** Blending in teammates' rewards adds
+reward a car cannot control, so its own actions explain less of its return.
+Rescaling the reward would not help, because `standardize_returns` cancels a
+constant scale. What is left is the balance against the entropy bonus, which
+pulls an off-uniform policy back toward uniform, and the action table is
+dominated by jump actions, which fits air time rising first.
+
+**Fix.** `ent_coef` now falls linearly from 0.01 to 0.002 over 200M steps, the
+same span team spirit ramps over (`ENT_COEF_FINAL_FRACTION`,
+`ENT_COEF_TIMESTEPS`; a fraction of 1 restores the constant). The value is set
+on `ppo_learner.ent_coef` between iterations, follows `Learner`'s real
+cumulative timesteps, and is logged in the `ent_coef` column of
+`_training_stats.csv`. Team spirit itself is unchanged.
+
+`Train_Aerial.py` still uses a constant 0.01, so Model B would be exposed to the
+same loosening. Revisit before training it.
+
+**This invalidates the old control.** Run 4 and the old 07 ablation used a
+constant 0.01. The new 01 must be compared against a new 07 run with the same
+schedule, or a difference could come from the schedule, not team spirit.
+
+**What to check on the next run:** entropy holds near 0.93 or lower after 200M
+instead of rising to 0.97, air time stays near 0.47 or lower, touches stay near
+60/min, and the coordination gains survive (overcommit ~0.14, spacing ~2,340).
+If coordination falls back to the no-team-spirit values, part of run 4's spacing
+was looseness after all.
 
 ## Change — Team spirit, to target ball-chasing — **added 2026-10-11, not yet run**
 

@@ -524,7 +524,8 @@ class TrainingStatsLogger:
 
     def __init__(self, csv_path: str, run_label: str, n_actions: int, ent_coef: float,
                  policy_lr: float, critic_lr: float, anneal_timesteps: float = 0.0,
-                 anneal_start_timesteps: float = 0.0):
+                 anneal_start_timesteps: float = 0.0,
+                 ent_coef_final: float = None, ent_coef_timesteps: float = 0.0):
         self.csv_path = csv_path
         self.run_label = run_label
         self.max_entropy = float(np.log(n_actions))
@@ -533,12 +534,40 @@ class TrainingStatsLogger:
         self.critic_lr = critic_lr
         self.anneal_timesteps = anneal_timesteps
         self.anneal_start_timesteps = anneal_start_timesteps
+        self.ent_coef_start = ent_coef
+        self.ent_coef_final = ent_coef if ent_coef_final is None else ent_coef_final
+        self.ent_coef_timesteps = ent_coef_timesteps
+        self.learner = None
         directory = os.path.dirname(csv_path)
         if directory:
             os.makedirs(directory, exist_ok=True)
         if not os.path.exists(csv_path):
             with open(csv_path, "w", newline="") as f:
                 csv.writer(f).writerow(TRAINING_STATS_COLUMNS)
+
+    def scheduled_ent_coef(self, timesteps: float) -> float:
+        """Linear ent_coef_start -> ent_coef_final over ent_coef_timesteps."""
+        if self.ent_coef_timesteps <= 0:
+            return self.ent_coef_final
+        progress = min(1.0, float(timesteps) / self.ent_coef_timesteps)
+        return self.ent_coef_start + (self.ent_coef_final - self.ent_coef_start) * progress
+
+    def attach(self, learner) -> None:
+        """Give this logger the Learner so it can apply the entropy schedule.
+
+        PPOLearner.learn reads self.ent_coef on every minibatch (confirmed
+        against ppo_learner.py's source), so assigning it between iterations
+        takes effect immediately with no rlgym_ppo changes. Applied once here
+        as well because Learner restores cumulative_timesteps in __init__: a
+        resumed run must continue the schedule, not restart it."""
+        self.learner = learner
+        self._apply_ent_coef(learner.agent.cumulative_timesteps)
+
+    def _apply_ent_coef(self, timesteps: float) -> None:
+        if self.learner is None:
+            return
+        self.ent_coef = self.scheduled_ent_coef(timesteps)
+        self.learner.ppo_learner.ent_coef = self.ent_coef
 
     def install(self) -> None:
         import time
@@ -553,6 +582,9 @@ class TrainingStatsLogger:
                 self._write(loggable_metrics, time.time())
             except Exception as e:  # logging must never kill a training run
                 print(f"TrainingStatsLogger: failed to write row ({e!r})")
+            timesteps = loggable_metrics.get("Cumulative Timesteps")
+            if timesteps is not None:
+                self._apply_ent_coef(timesteps)
             return original(loggable_metrics, debug_metrics, wandb_run)
 
         report_metrics._training_stats_logger = True
