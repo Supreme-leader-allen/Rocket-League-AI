@@ -1,0 +1,7 @@
+rlbot==2.0.0b56
+rlgym-compat==2.3.6
+rlgym==2.0.1
+rlgym-rocket-league==2.0.1
+rocketsim==2.2.1
+numpy<2
+torch

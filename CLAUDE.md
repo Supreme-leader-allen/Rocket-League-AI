@@ -92,4 +92,7 @@ several that are easy to get wrong from reading the code alone.
   random policy), then `touches_per_minute` in the episode CSV against the
   baseline. Two full runs were lost to a policy that never left uniform — see
   the 2026-09-30 P0 in `docs/ISSUES.md`.
+- `rlbot_bridge/` runs a policy in real Rocket League and reuses `Observation.py`,
+  `Actions.py` and `Metrics.py` directly, in its own venv. After changing the
+  observation, run its `test_obs_parity.py` and `test_closed_loop.py`.
 - Never commit checkpoints or metrics output. See `.gitignore`.

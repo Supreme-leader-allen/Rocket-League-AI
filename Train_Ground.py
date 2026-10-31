@@ -289,6 +289,13 @@ def build_rlgym_v2_env(run_label: str = None, csv_path: str = None, fitness_csv_
 POLICY_LAYER_SIZES = [2048, 2048, 1024, 1024]
 CRITIC_LAYER_SIZES = [2048, 2048, 1024, 1024]
 
+# Discount factor. rlgym_ppo's default 0.99 at 15 decisions/sec is a horizon of
+# ~100 steps, about 7 seconds -- too short for hanging back or rotating out to
+# pay off, since the goal it prevents or sets up is usually further away than
+# that. 0.995 doubles it to ~13s. Doesn't touch the network, so old checkpoints
+# still load. Not yet verified by a run.
+GAE_GAMMA = float(os.environ.get("GAE_GAMMA", 0.995))
+
 
 def shared_learner_kwargs(n_proc: int) -> dict:
     """Learner settings common to Model A and Model B."""
@@ -303,6 +310,7 @@ def shared_learner_kwargs(n_proc: int) -> dict:
         exp_buffer_size=300_000,
         ppo_minibatch_size=50_000,
         ppo_epochs=2,
+        gae_gamma=GAE_GAMMA,
         standardize_returns=True,
         standardize_obs=False,
         log_to_wandb=False,

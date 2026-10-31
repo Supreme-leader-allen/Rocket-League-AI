@@ -154,11 +154,20 @@ class FaceBallReward(RewardFunction[AgentID, GameState, float]):
 # in 2v2 with far more training; at this budget in 4v4 that measurably
 # fails, and experiments/04_no_anneal.sh remains the ablation for whether
 # annealing matters at all.
+#
+# Speed-to-ball and face-ball now fade fully to zero (changed 2026-10-31).
+# Run 6 stayed clumped (overcommit 0.31) even at team spirit 0.8, and these
+# terms are why team spirit can't help: touch is one event per ball hit, so
+# blending it removes the race for it, but speed-to-ball is paid to every
+# car at once, so four cars driving at the ball earn four times what one
+# does, blended or not. They were only ever needed to make the first
+# touches discoverable. Touch and ball-to-goal keep their floors, so the
+# signal run 3 collapsed without is still there. Not yet verified by a run.
 SHAPING_SCHEDULES = {
     "ground": [
         (TouchBallReward, 5.0, 2.5),
-        (SpeedTowardBallReward, 0.5, 0.25),
-        (FaceBallReward, 0.1, 0.05),
+        (SpeedTowardBallReward, 0.5, 0.0),
+        (FaceBallReward, 0.1, 0.0),
         (VelocityBallToGoalReward, 1.0, 1.0),
         (InAirReward, 0.03, 0.015),
     ],
@@ -166,8 +175,8 @@ SHAPING_SCHEDULES = {
     # aerial play is new and gets dense InAirReward guidance again.
     "aerial": [
         (TouchBallReward, 2.5, 2.5),
-        (SpeedTowardBallReward, 0.25, 0.25),
-        (FaceBallReward, 0.05, 0.05),
+        (SpeedTowardBallReward, 0.0, 0.0),
+        (FaceBallReward, 0.0, 0.0),
         (VelocityBallToGoalReward, 1.0, 1.0),
         (InAirReward, 0.2, 0.05),
     ],

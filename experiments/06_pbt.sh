@@ -8,26 +8,24 @@
 # timesteps-per-run) -- you should consciously choose to pay that, not have
 # it silently added to every run_all.sh invocation.
 #
-# ROUND maps onto PBT's own, orthogonal scale like this:
-#   - GENERATION_TIMESTEPS = ROUND * 100,000, exactly like every other
-#     script's LIMIT -- "1 round" still means the same thing, just applied
-#     per member per generation instead of per whole run.
-#   - POPULATION_SIZE / N_GENERATIONS stay small (2 / 2) at or below the
-#     documented local-smoke-test ROUND (5), so a bare `ROUND=5` invocation
-#     actually finishes in a comparable ballpark to the other scripts
-#     instead of taking population x generations times longer; above that
-#     they step up to Pbt.py's own real-run defaults (4 members, 10
-#     generations). Override PBT_POPULATION_SIZE / PBT_N_GENERATIONS
-#     directly if you want something else at any ROUND.
-#   - N_PROC_PER_MEMBER gets the full measured $N_PROC, not a fraction of
-#     it: Pbt.py trains population members sequentially, one at a time
-#     (confirmed by reading main()), never in parallel, so there's no
-#     population-size split to account for the way there would be if
-#     members trained concurrently.
+# ROUND means the same thing here as everywhere else: 1 round = 100,000
+# timesteps, and ROUND is the total EACH MEMBER trains for. It's split evenly
+# across generations. So ROUND=3000 is 300M per member, comparable to one
+# 01_ground.sh run, and 1.2B timesteps across a population of 4. It used to
+# be per generation, which made ROUND=3000 silently mean 12 billion timesteps.
+#
+# POPULATION_SIZE / N_GENERATIONS stay small (2 / 2) at or below the local
+# smoke-test ROUND (5). Override PBT_POPULATION_SIZE / PBT_N_GENERATIONS
+# explicitly to change them.
 set -euo pipefail
 source "$(dirname "$0")/params.sh"
 cd "$REPO_ROOT"
 banner "06  PBT (population-based training / evolution)"
+
+if ! ls "$OUT"/metrics/baseline_random.*.csv >/dev/null 2>&1; then
+    echo "no baseline in $OUT/metrics -- running 00_baseline.sh first"
+    bash "$(dirname "$0")/00_baseline.sh"
+fi
 
 if [ "$ROUND" -le 5 ]; then
     PBT_POPULATION_SIZE="${PBT_POPULATION_SIZE:-2}"
@@ -37,12 +35,13 @@ else
     PBT_N_GENERATIONS="${PBT_N_GENERATIONS:-10}"
 fi
 
-echo "population=$PBT_POPULATION_SIZE  generations=$PBT_N_GENERATIONS  generation_timesteps=$LIMIT  n_proc_per_member=$N_PROC"
+GENERATION_TIMESTEPS=$(( LIMIT / PBT_N_GENERATIONS ))
+echo "population=$PBT_POPULATION_SIZE  generations=$PBT_N_GENERATIONS  generation_timesteps=$GENERATION_TIMESTEPS  n_proc_per_member=$N_PROC"
 
 PBT_OUT_DIR="$OUT" \
 PBT_POPULATION_SIZE="$PBT_POPULATION_SIZE" \
 PBT_N_GENERATIONS="$PBT_N_GENERATIONS" \
-PBT_GENERATION_TIMESTEPS="$LIMIT" \
+PBT_GENERATION_TIMESTEPS="$GENERATION_TIMESTEPS" \
 PBT_N_PROC_PER_MEMBER="$N_PROC" \
     python Pbt.py 2>&1 | tee "$OUT/logs/06_pbt.log"
 

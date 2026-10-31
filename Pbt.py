@@ -1,8 +1,8 @@
 """
 Population-based training (Liu et al. 2019 / FTW-style) over
 Train_Ground.py. Each population member is its own independent training
-run with its own learning rate / entropy coefficient / checkpoint
-lineage, launched as a subprocess per generation via the PBT_* env vars
+run with its own learning rates / entropy coefficient / team spirit /
+checkpoint lineage, launched as a subprocess per generation via the PBT_* env vars
 Train_Ground.py reads (see that file's module docstring for the full
 list) -- this avoids duplicating the training script.
 
@@ -31,8 +31,11 @@ Each generation:
 3. Exploit + explore: the bottom BOTTOM_FRACTION of the population, by
    fitness, is told to warm-start its NEXT generation from a randomly
    chosen top performer's checkpoint (exploit) instead of its own, and
-   has its learning rate / entropy coefficient randomly perturbed
-   (explore) -- standard PBT. This does NOT copy files around: each
+   has its learning rates / entropy coefficient / team spirit randomly
+   perturbed (explore) -- standard PBT. Team spirit is in that list
+   because Liu et al. evolve reward settings too, not just learning rates:
+   selection is on win rate, so which level of reward sharing survives is
+   decided by competition, not chosen by hand. This does NOT copy files around: each
    member always trains into and saves under its own checkpoint
    lineage (PBT_CHECKPOINT_DIR), and exploit just overrides which
    checkpoint the NEXT generation's subprocess is told to load from via
@@ -65,8 +68,10 @@ itself, and the two sets must never share a name.
 """
 
 import json
+import math
 import os
 import random
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -76,7 +81,8 @@ POPULATION_SIZE = int(os.environ.get("PBT_POPULATION_SIZE", 4))
 N_GENERATIONS = int(os.environ.get("PBT_N_GENERATIONS", 10))
 GENERATION_TIMESTEPS = int(os.environ.get("PBT_GENERATION_TIMESTEPS", 2_000_000))
 N_PROC_PER_MEMBER = int(os.environ.get("PBT_N_PROC_PER_MEMBER", 8))
-EVAL_EPISODES_PER_MATCHUP = 4
+# 4 was too noisy to rank anything: 12 games per member per generation.
+EVAL_EPISODES_PER_MATCHUP = int(os.environ.get("PBT_EVAL_EPISODES", 10))
 BOTTOM_FRACTION = 0.25  # fraction of the population replaced each generation
 PERTURB_RANGE = (0.8, 1.2)
 
@@ -106,11 +112,19 @@ else:
     CSV_ROOT = "metrics/pbt"
     GENERATION_LOG_PATH = os.path.join(CSV_ROOT, "generations.jsonl")
 
-INITIAL_POLICY_LR = 1e-4
-INITIAL_CRITIC_LR = 1e-4
-# Matches Train_Ground.py's ENT_COEF default (0.01) -- see that file's
-# comment for why the brief drop to 0.001 was reverted.
-INITIAL_ENT_COEF = 0.01
+# Log-uniform ranges each member's starting values are drawn from, centered on
+# Train_Ground.py's defaults. Members used to all start from the same values,
+# so generation 0 had no variety for selection to act on.
+INITIAL_LR_RANGE = (5e-5, 2e-4)
+INITIAL_ENT_COEF_RANGE = (0.005, 0.02)
+# Team spirit is drawn uniformly. Run 6 stayed clumped at 0.8, so the range
+# leans high; 1.0 is full sharing.
+TEAM_SPIRIT_RANGE = (0.6, 1.0)
+TEAM_SPIRIT_PERTURB = 0.1
+
+
+def _log_uniform(low: float, high: float) -> float:
+    return math.exp(random.uniform(math.log(low), math.log(high)))
 
 # GENERATION_TIMESTEPS must exceed this or a generation could complete
 # without a single save -- see Train_Ground.py's SAVE_EVERY_TS comment
@@ -135,8 +149,10 @@ SAVE_EVERY_TS = max(1, GENERATION_TIMESTEPS // 8)
 
 
 class PopulationMember:
-    def __init__(self, member_id: int, policy_lr: float, critic_lr: float, ent_coef: float):
+    def __init__(self, member_id: int, policy_lr: float, critic_lr: float, ent_coef: float,
+                 team_spirit_final: float):
         self.member_id = member_id
+        self.team_spirit_final = team_spirit_final
         self.policy_lr = policy_lr
         self.critic_lr = critic_lr
         self.ent_coef = ent_coef
@@ -224,6 +240,7 @@ def train_generation(member: PopulationMember, generation: int) -> None:
     env["PBT_POLICY_LR"] = str(member.policy_lr)
     env["PBT_CRITIC_LR"] = str(member.critic_lr)
     env["PBT_ENT_COEF"] = str(member.ent_coef)
+    env["TEAM_SPIRIT_FINAL"] = str(member.team_spirit_final)
     env["PBT_N_PROC"] = str(N_PROC_PER_MEMBER)
     env["PBT_CHECKPOINT_DIR"] = member.checkpoint_dir
     env["PBT_SAVE_EVERY_TS"] = str(SAVE_EVERY_TS)
@@ -257,7 +274,8 @@ def train_generation(member: PopulationMember, generation: int) -> None:
         ("own lineage" if load_folder else "fresh start")
     print(f"[gen {generation}] training member {member.member_id} "
           f"(policy_lr={member.policy_lr:.2e}, critic_lr={member.critic_lr:.2e}, "
-          f"ent_coef={member.ent_coef:.4f}, warm start: {source}, "
+          f"ent_coef={member.ent_coef:.4f}, team_spirit={member.team_spirit_final:.2f}, "
+          f"warm start: {source}, "
           f"loaded_ts={loaded_ts}, target_ts={loaded_ts + GENERATION_TIMESTEPS})")
 
     result = subprocess.run([sys.executable, "Train_Ground.py"], env=env)
@@ -340,8 +358,36 @@ def exploit_and_explore(population: List[PopulationMember], generation: int) -> 
         loser.policy_lr = winner.policy_lr * random.uniform(*PERTURB_RANGE)
         loser.critic_lr = winner.critic_lr * random.uniform(*PERTURB_RANGE)
         loser.ent_coef = max(1e-4, winner.ent_coef * random.uniform(*PERTURB_RANGE))
+        loser.team_spirit_final = min(1.0, max(0.0, winner.team_spirit_final
+                                               + random.uniform(-TEAM_SPIRIT_PERTURB, TEAM_SPIRIT_PERTURB)))
         print(f"[gen {generation}] member {loser.member_id} (fitness={loser.fitness:.3f}) "
               f"exploits member {winner.member_id} (fitness={winner.fitness:.3f})")
+
+
+def prune_checkpoints(population: List[PopulationMember]) -> None:
+    """
+    Keep only what the next generation can load: each member's newest
+    checkpoint. Every generation is a new process, so Learner starts a new
+    timestamped folder, and n_checkpoints_to_keep only limits one folder. Left
+    alone that's 5 checkpoints x 174 MB x 4 members x 10 generations, ~34 GB,
+    more than a pod's disk. A pending exploit points at a winner's newest
+    checkpoint, so it's already kept.
+    """
+    keep = {os.path.normpath(m.latest_checkpoint()) for m in population if m.latest_checkpoint()}
+    keep |= {os.path.normpath(m.pending_load_override) for m in population if m.pending_load_override}
+    for member in population:
+        base = os.path.basename(member.checkpoint_dir) + "-"
+        root = os.path.dirname(member.checkpoint_dir)
+        for run in os.listdir(root):
+            run_path = os.path.join(root, run)
+            if not run.startswith(base) or not os.path.isdir(run_path):
+                continue
+            for checkpoint in os.listdir(run_path):
+                path = os.path.normpath(os.path.join(run_path, checkpoint))
+                if checkpoint.isdigit() and path not in keep:
+                    shutil.rmtree(path)
+            if not os.listdir(run_path):
+                os.rmdir(run_path)
 
 
 def log_generation(population: List[PopulationMember], generation: int) -> None:
@@ -358,16 +404,55 @@ def log_generation(population: List[PopulationMember], generation: int) -> None:
                 "policy_lr": member.policy_lr,
                 "critic_lr": member.critic_lr,
                 "ent_coef": member.ent_coef,
+                "team_spirit_final": member.team_spirit_final,
             }) + "\n")
 
 
-def main() -> None:
-    population = [
-        PopulationMember(i, INITIAL_POLICY_LR, INITIAL_CRITIC_LR, INITIAL_ENT_COEF)
-        for i in range(POPULATION_SIZE)
-    ]
+def resume_population() -> Optional[tuple]:
+    """(population, next generation) from generations.jsonl, or None if this
+    is a fresh run. Lets a stopped pod continue with the settings evolution had
+    reached instead of re-randomizing them. Checkpoints resume on their own:
+    train_generation loads each member's newest one."""
+    if not os.path.exists(GENERATION_LOG_PATH):
+        return None
+    latest = {}
+    with open(GENERATION_LOG_PATH) as f:
+        for line in f:
+            row = json.loads(line)
+            latest[row["member_id"]] = row
+    if len(latest) != POPULATION_SIZE:
+        return None
+    population = []
+    for member_id in range(POPULATION_SIZE):
+        row = latest[member_id]
+        member = PopulationMember(member_id, row["policy_lr"], row["critic_lr"], row["ent_coef"],
+                                  row["team_spirit_final"])
+        member.fitness = row["fitness"]
+        population.append(member)
+    return population, max(row["generation"] for row in latest.values()) + 1
 
-    for generation in range(N_GENERATIONS):
+
+def main() -> None:
+    resumed = resume_population()
+    if resumed is not None:
+        population, first_generation = resumed
+        print(f"Resuming from generations.jsonl at generation {first_generation}.")
+        if first_generation < N_GENERATIONS:
+            exploit_and_explore(population, first_generation - 1)
+    else:
+        first_generation = 0
+        population = [
+            PopulationMember(
+                i,
+                _log_uniform(*INITIAL_LR_RANGE),
+                _log_uniform(*INITIAL_LR_RANGE),
+                _log_uniform(*INITIAL_ENT_COEF_RANGE),
+                random.uniform(*TEAM_SPIRIT_RANGE),
+            )
+            for i in range(POPULATION_SIZE)
+        ]
+
+    for generation in range(first_generation, N_GENERATIONS):
         for member in population:
             train_generation(member, generation)
 
@@ -376,6 +461,7 @@ def main() -> None:
 
         if generation < N_GENERATIONS - 1:
             exploit_and_explore(population, generation)
+        prune_checkpoints(population)
 
     best = max(population, key=lambda m: m.fitness)
     print(f"PBT complete. Best member: {best.member_id} "

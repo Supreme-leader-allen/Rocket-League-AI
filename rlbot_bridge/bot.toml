@@ -1,0 +1,10 @@
+[settings]
+agent_id = "rocket-league-ai/trained"
+name = "Trained"
+hivemind = true
+run_command = ".venv\\Scripts\\python.exe bot.py"
+
+[details]
+description = "4v4 PPO policy trained in RLGym with a view cone and reaction delay."
+developer = "Allen Jankovic"
+language = "python"

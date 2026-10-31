@@ -199,7 +199,7 @@ class FrozenPolicy:
         return np.atleast_1d(action).astype(np.int32)
 
 
-def build_eval_env():
+def build_eval_env(renderer=None):
     """
     Minimal 4v4 env for pure-inference matches between two frozen
     policies -- no training, no shaping, no CoordinationMetrics/
@@ -250,6 +250,7 @@ def build_eval_env():
         termination_cond=termination_condition,
         truncation_cond=truncation_condition,
         transition_engine=RocketSimEngine(),
+        renderer=renderer,
     )
 
 

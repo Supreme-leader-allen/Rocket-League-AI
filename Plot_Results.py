@@ -87,7 +87,7 @@ def _load_coordination_csvs(metrics_dir: Path) -> pd.DataFrame:
     # and glob("*.csv") would otherwise mix schemas).
     frames = []
     for path in sorted(metrics_dir.glob("*.csv")):
-        if "_fitness." in path.name or path.name.startswith("pbt") or "_training_stats" in path.name:
+        if "_fitness." in path.name or "_training_stats" in path.name:
             continue
         try:
             df = pd.read_csv(path)

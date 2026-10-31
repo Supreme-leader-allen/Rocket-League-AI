@@ -52,11 +52,41 @@ execution, not just by reading the corrected code.
 | **P2** | Occluded cars leaked rotation, boost, ground state (2026-09-30) | Partial information was partial | **FIXED** |
 | **P2** | Baseline never ran on either real run (2026-09-30) | No comparison possible | **FIXED** |
 | **P0** | Shaping annealed to zero un-learned everything (2026-10-10) | Run 3 learned, then reverted to random | **FIXED** — needs a fresh run |
+| **Change** | PBT made usable; rewards and gamma changed to target ball-chasing (2026-10-31) | Run 6 stayed clumped | Not yet run |
 | **Change** | Entropy schedule to recover team spirit's skill loss (2026-10-30) | Run 4 lost mechanical skill | Skill recovered; most of run 4's spacing gain went with it |
 | **Change** | Team spirit added (2026-10-11) | Targets run 3's ball-chasing | Effect far smaller than runs 4/07 implied — see the entropy-schedule entry |
 | **Gap** | Training against frozen past checkpoints | Self-play is mirror-only | Open — see below |
 
 ---
+
+## Change — PBT made usable, and changes to target ball-chasing — **added 2026-10-31, not yet run**
+
+Population-based training had never been part of a real run. Before it could be:
+- Members all started from identical settings, so selection had nothing to act
+  on in generation 0. They now start from random ranges, as the paper describes.
+- `06_pbt.sh` applied `ROUND` per generation, so `ROUND=3000` meant 12B timesteps.
+  `ROUND` is now the total per member (300M each, 1.2B for a population of 4).
+- A full run would have written ~34 GB of checkpoints; `Pbt.prune_checkpoints`
+  now keeps only each member's newest.
+- A stopped run restarted with re-randomized settings; `Pbt.resume_population`
+  continues from `generations.jsonl`. Move `output` aside to start over.
+- The tournament was 4 games per pairing, now 10. `Plot_Results.py` was skipping
+  `pbt_member_*` data.
+- Team spirit now evolves (range 0.6–1.0) along with the learning rates and
+  entropy, following Liu et al.'s evolving of reward settings. Selection is still
+  on win rate only, so coordination isn't selected for directly.
+
+Two changes aimed at run 6's clumping, untested:
+- Speed-to-ball and face-ball fade to 0, not 50%. Speed-to-ball pays every car at
+  once, so team spirit can't remove the reward for four cars chasing together.
+- `gae_gamma` 0.99 → 0.995, a horizon of about 13s instead of 7s.
+
+These change the training setup, so results aren't comparable with run 6 unless
+a run is labeled as a new condition. Mirror self-play is unchanged: PBT selects
+between members, but each still trains against itself.
+
+Verified: a real 2-member, 2-generation PBT ran through exploit and perturbation.
+Pruning was checked against a fake checkpoint tree. Not measured: full-run time.
 
 ## Change — Entropy schedule, to recover team spirit's skill loss — **added 2026-10-30, tested by run 6**
 
