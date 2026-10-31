@@ -52,13 +52,13 @@ execution, not just by reading the corrected code.
 | **P2** | Occluded cars leaked rotation, boost, ground state (2026-09-30) | Partial information was partial | **FIXED** |
 | **P2** | Baseline never ran on either real run (2026-09-30) | No comparison possible | **FIXED** |
 | **P0** | Shaping annealed to zero un-learned everything (2026-10-10) | Run 3 learned, then reverted to random | **FIXED** — needs a fresh run |
-| **Change** | Entropy schedule to recover team spirit's skill loss (2026-10-30) | Run 4 lost mechanical skill | Not yet run |
-| **Change** | Team spirit added (2026-10-11) | Targets run 3's ball-chasing | Run 4 + 07 ablation: team spirit reduces clumping, at a mechanical cost |
+| **Change** | Entropy schedule to recover team spirit's skill loss (2026-10-30) | Run 4 lost mechanical skill | Skill recovered; most of run 4's spacing gain went with it |
+| **Change** | Team spirit added (2026-10-11) | Targets run 3's ball-chasing | Effect far smaller than runs 4/07 implied — see the entropy-schedule entry |
 | **Gap** | Training against frozen past checkpoints | Self-play is mirror-only | Open — see below |
 
 ---
 
-## Change — Entropy schedule, to recover team spirit's skill loss — **added 2026-10-30, not yet run**
+## Change — Entropy schedule, to recover team spirit's skill loss — **added 2026-10-30, tested by run 6**
 
 At 250–300M, team spirit (run 4) played measurably worse mechanically than the
 no-team-spirit ablation: touches 35 vs 63/min, air time 0.65 vs 0.47, entropy
@@ -84,6 +84,30 @@ same loosening. Revisit before training it.
 **This invalidates the old control.** Run 4 and the old 07 ablation used a
 constant 0.01. The new 01 must be compared against a new 07 run with the same
 schedule, or a difference could come from the schedule, not team spirit.
+
+**Run 6 result (2026-10-30; team spirit and a new 07 ablation, both 300M steps,
+both on this schedule).** Values at 250–300M:
+
+| | Random | Run 4 TS | Old 07 | Run 6 TS | Run 6 no TS |
+| --- | --- | --- | --- | --- | --- |
+| Touches/min | 2.6 | 34.7 | 62.7 | 56.0 | 80.2 |
+| Air time | 0.83 | 0.65 | 0.47 | 0.18 | 0.19 |
+| Episodes with a goal | 0.10 | 0.96 | 0.98 | 0.98 | 0.99 |
+| Entropy / max | 1.00 | 0.97 | 0.93 | 0.84 | 0.78 |
+| Overcommit rate | 0.004 | 0.14 | 0.27 | 0.31 | 0.37 |
+| Teammate spacing (uu) | 4,418 | 2,340 | 1,723 | 1,480 | 1,332 |
+| Depth spread (uu) | 2,210 | 1,144 | 813 | 713 | 641 |
+| Goal-side rate | 0.92 | 0.77 | 0.76 | 0.74 | 0.74 |
+
+Mechanical skill recovered and passed both constant-entropy runs. Most of the
+spreading went with it: **run 6's team-spirit spacing is below the old 07
+ablation's**, so run 4's spacing was mostly looser play, not coordination. The
+earlier estimate that about half of it survived matching on air time overstated
+the effect; air time was too coarse a proxy for looseness. Team spirit's
+remaining effect at matched entropy schedules is real but small: overcommit
+d = -0.57, spacing d = +0.50, depth d = +0.41 (run 4 vs old 07: -1.5, +2.1,
++1.8). Goal-side rate is unchanged, so neither run learned to keep a defender
+back. One seed per condition.
 
 **What to check on the next run:** entropy holds near 0.93 or lower after 200M
 instead of rising to 0.97, air time stays near 0.47 or lower, touches stay near
