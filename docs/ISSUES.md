@@ -52,12 +52,53 @@ execution, not just by reading the corrected code.
 | **P2** | Occluded cars leaked rotation, boost, ground state (2026-09-30) | Partial information was partial | **FIXED** |
 | **P2** | Baseline never ran on either real run (2026-09-30) | No comparison possible | **FIXED** |
 | **P0** | Shaping annealed to zero un-learned everything (2026-10-10) | Run 3 learned, then reverted to random | **FIXED** — needs a fresh run |
-| **Change** | PBT made usable; rewards and gamma changed to target ball-chasing (2026-10-31) | Run 6 stayed clumped | Not yet run |
+| **P0** | Run 7 (PBT) collapsed back to near-random after 150M (2026-11-07) | No usable policy from run 7 | Open |
+| **Change** | PBT made usable; rewards and gamma changed to target ball-chasing (2026-10-31) | Run 6 stayed clumped | Run 7: collapsed — see the P0 above it |
 | **Change** | Entropy schedule to recover team spirit's skill loss (2026-10-30) | Run 4 lost mechanical skill | Skill recovered; most of run 4's spacing gain went with it |
 | **Change** | Team spirit added (2026-10-11) | Targets run 3's ball-chasing | Effect far smaller than runs 4/07 implied — see the entropy-schedule entry |
 | **Gap** | Training against frozen past checkpoints | Self-play is mirror-only | Open — see below |
 
 ---
+
+## P0 — Run 7 (PBT) collapsed back to near-random after 150M — **OPEN (2026-11-07)**
+
+Run 7: 4 members, 10 generations, ~270–296M steps each, on the 2026-10-31
+setup (speed-to-ball and face-ball faded to 0, gamma 0.995, team spirit
+evolved). Averaged over all four members:
+
+| Steps | Goal in episode | Touches/min | Air time | Overcommit | Spacing (uu) | Team spirit |
+| --- | --- | --- | --- | --- | --- | --- |
+| random | 0.09 | 2.5 | 0.83 | 0.004 | 4,367 | – |
+| 50–150M (peak) | 0.79 | 22–23 | 0.65 | 0.10 | 2,300 | 0.3–0.5 |
+| 150–200M | 0.58 | 15 | 0.77 | 0.06 | 2,982 | 0.74 |
+| 250M+ | 0.20 | 8.6 | 0.83 | 0.02 | 4,008 | 0.93 |
+| run 6 TS, 230M+ | 0.98 | 56.5 | 0.18 | 0.31 | 1,471 | 0.80 |
+
+By the end every member is close to the random baseline. Their low overcommit and
+wide spacing are random wandering, not coordination: air time is the random
+policy's 0.83. The decline starts once speed-to-ball has mostly faded and team
+spirit passes ~0.7.
+
+**Likely mechanism (inferred).** It's the same signal-starvation failure as run 3,
+reached by a different route. At tau 0.93 a car keeps 1 - 0.75 x 0.93 ≈ 30% of
+its own touch reward (2.5 → ~0.76), and speed-to-ball no longer pays anything.
+The per-car signal fell below what held the policy in run 3 (collapse began around
+30% of the original shaping), and the entropy bonus pulled it back toward random.
+Entropy ended at 0.88–0.92 of max, lower than random, but air time says the
+remaining structure isn't useful play.
+
+**Why PBT didn't stop it.** Fitness is win rate against the other members only.
+All four members collapsed together, so they kept winning about half their games
+against each other (final fitness 0.48–0.52), and nothing looked wrong. Team spirit
+drifted up (mean 0.82 → 0.93), but with 30 games per member per generation the
+fitness differences (±0.09 standard error) are noise, so that drift is not
+evidence that higher team spirit wins.
+
+**Fixes to make before another PBT run, none implemented:**
+- Restore the speed-to-ball floor (0.5 → 0.25) that run 6 had, which never collapsed.
+- Cap evolved team spirit, e.g. at 0.8, or keep the per-car touch share fixed as tau rises.
+- Add an absolute fitness term against a fixed opponent (e.g. the run 6 policy), so a
+  population-wide collapse lowers everyone's fitness instead of staying invisible.
 
 ## Change — PBT made usable, and changes to target ball-chasing — **added 2026-10-31, not yet run**
 
