@@ -24,7 +24,12 @@ from rlbot.managers import MatchManager
 HERE = Path(__file__).resolve().parent
 RESULT_COLUMNS = ["label", "skill", "match", "our_team", "our_score", "opponent_score", "result"]
 SKILLS = {"rookie": flat.PsyonixSkill.Rookie, "pro": flat.PsyonixSkill.Pro, "allstar": flat.PsyonixSkill.AllStar}
-LAUNCHERS = {"epic": flat.Launcher.Epic, "steam": flat.Launcher.Steam}
+# "none": RLBot connects to a Rocket League you started yourself with
+# -rlbot RLBot_ControllerURL=127.0.0.1:23233 RLBot_PacketSendRate=240 -nomovie
+# (Epic: Library -> Rocket League -> ... -> Manage -> Launch Options). For when
+# RLBot's own Epic launch hangs: it starts the game through Epic, closes it, and
+# is meant to reopen it in bot mode, which sometimes never happens.
+LAUNCHERS = {"epic": flat.Launcher.Epic, "steam": flat.Launcher.Steam, "none": flat.Launcher.NoLaunch}
 
 
 def match_config(skill: flat.PsyonixSkill, our_team: int, launcher: flat.Launcher) -> flat.MatchConfiguration:
@@ -82,30 +87,51 @@ def main() -> None:
         with open(results_path, "w", newline="") as f:
             csv.writer(f).writerow(RESULT_COLUMNS)
 
+    stop_leftover_servers()
     tally = {skill: [0, 0, 0] for skill in args.skills}
     with MatchManager() as manager:
-        for skill in args.skills:
-            for match in range(args.matches):
-                our_team = match % 2
-                with open(HERE / "active_run.json", "w", encoding="utf-8") as f:
-                    json.dump({
-                        "policy": str(policy),
-                        "run_label": f"{args.label}_{skill}",
-                        "metrics_csv": str(results_dir / f"{args.label}_{skill}.csv"),
-                    }, f)
-
-                print(f"{skill} match {match + 1}/{args.matches} (team {'orange' if our_team else 'blue'})")
-                ours, theirs = play_match(manager, match_config(SKILLS[skill], our_team, LAUNCHERS[args.launcher]), our_team)
-                result = "win" if ours > theirs else "loss" if ours < theirs else "draw"
-                tally[skill][("win", "loss", "draw").index(result)] += 1
-                print(f"  {ours}-{theirs} {result}")
-                with open(results_path, "a", newline="") as f:
-                    csv.writer(f).writerow([args.label, skill, match + 1, our_team, ours, theirs, result])
-
-        manager.shut_down()
+        try:
+            play_series(manager, args, policy, results_dir, results_path, tally)
+        finally:
+            # also on Ctrl+C or an error, so no half-dead server is left behind
+            manager.shut_down()
 
     for skill, (wins, losses, draws) in tally.items():
         print(f"{skill}: {wins} wins, {losses} losses, {draws} draws")
+
+
+def stop_leftover_servers() -> None:
+    """A run that was interrupted can leave RLBotServer.exe running with its
+    connection closed. MatchManager then finds it, assumes it works, and every
+    connection is refused. This script owns the server's lifecycle, so it
+    starts from a clean one."""
+    import psutil
+
+    for proc in psutil.process_iter(["name"]):
+        if proc.info["name"] == "RLBotServer.exe":
+            print(f"Stopping a leftover RLBotServer (process {proc.pid}).")
+            proc.kill()
+            proc.wait(timeout=10)
+
+
+def play_series(manager, args, policy, results_dir, results_path, tally) -> None:
+    for skill in args.skills:
+        for match in range(args.matches):
+            our_team = match % 2
+            with open(HERE / "active_run.json", "w", encoding="utf-8") as f:
+                json.dump({
+                    "policy": str(policy),
+                    "run_label": f"{args.label}_{skill}",
+                    "metrics_csv": str(results_dir / f"{args.label}_{skill}.csv"),
+                }, f)
+
+            print(f"{skill} match {match + 1}/{args.matches} (team {'orange' if our_team else 'blue'})")
+            ours, theirs = play_match(manager, match_config(SKILLS[skill], our_team, LAUNCHERS[args.launcher]), our_team)
+            result = "win" if ours > theirs else "loss" if ours < theirs else "draw"
+            tally[skill][("win", "loss", "draw").index(result)] += 1
+            print(f"  {ours}-{theirs} {result}")
+            with open(results_path, "a", newline="") as f:
+                csv.writer(f).writerow([args.label, skill, match + 1, our_team, ours, theirs, result])
 
 
 if __name__ == "__main__":

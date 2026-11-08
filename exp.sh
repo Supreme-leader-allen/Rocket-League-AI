@@ -85,6 +85,14 @@ if [ -z "${N_PROC:-}" ]; then
         exit 1
     fi
     echo "  -> auto-selected N_PROC=$N_PROC"
+    # On a 128-core pod the benchmark chose so many processes that starting
+    # them ran out of RAM (exit code -9) during run 7. Raise MAX_N_PROC only
+    # if the pod has RAM to match.
+    MAX_N_PROC="${MAX_N_PROC:-32}"
+    if [ "$N_PROC" -gt "$MAX_N_PROC" ]; then
+        echo "  -> capped at MAX_N_PROC=$MAX_N_PROC"
+        N_PROC="$MAX_N_PROC"
+    fi
 else
     echo "[3/4] Using supplied N_PROC=$N_PROC (skipping benchmark)"
 fi

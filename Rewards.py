@@ -155,7 +155,14 @@ class FaceBallReward(RewardFunction[AgentID, GameState, float]):
 # fails, and experiments/04_no_anneal.sh remains the ablation for whether
 # annealing matters at all.
 #
-# Speed-to-ball and face-ball now fade fully to zero (changed 2026-10-31).
+# Speed-to-ball and face-ball faded fully to zero for run 7 (2026-10-31), and
+# run 7 collapsed back to near-random (docs/ISSUES.md "Run 7 (PBT) collapsed"):
+# with team spirit also evolving to ~0.93, each car kept too little reward for
+# its own play. Their 50% floors are back as of 2026-11-07 -- run 6's setup,
+# which never collapsed. The reasoning below is why they were removed, kept as
+# the record of what was tried.
+#
+# (Run 7's reasoning:) Speed-to-ball and face-ball fade fully to zero.
 # Run 6 stayed clumped (overcommit 0.31) even at team spirit 0.8, and these
 # terms are why team spirit can't help: touch is one event per ball hit, so
 # blending it removes the race for it, but speed-to-ball is paid to every
@@ -166,8 +173,8 @@ class FaceBallReward(RewardFunction[AgentID, GameState, float]):
 SHAPING_SCHEDULES = {
     "ground": [
         (TouchBallReward, 5.0, 2.5),
-        (SpeedTowardBallReward, 0.5, 0.0),
-        (FaceBallReward, 0.1, 0.0),
+        (SpeedTowardBallReward, 0.5, 0.25),
+        (FaceBallReward, 0.1, 0.05),
         (VelocityBallToGoalReward, 1.0, 1.0),
         (InAirReward, 0.03, 0.015),
     ],

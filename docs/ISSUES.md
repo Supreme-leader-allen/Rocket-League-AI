@@ -52,7 +52,7 @@ execution, not just by reading the corrected code.
 | **P2** | Occluded cars leaked rotation, boost, ground state (2026-09-30) | Partial information was partial | **FIXED** |
 | **P2** | Baseline never ran on either real run (2026-09-30) | No comparison possible | **FIXED** |
 | **P0** | Shaping annealed to zero un-learned everything (2026-10-10) | Run 3 learned, then reverted to random | **FIXED** — needs a fresh run |
-| **P0** | Run 7 (PBT) collapsed back to near-random after 150M (2026-11-07) | No usable policy from run 7 | Open |
+| **P0** | Run 7 (PBT) collapsed back to near-random after 150M (2026-11-07) | No usable policy from run 7 | **FIXED** in code, not yet rerun |
 | **Change** | PBT made usable; rewards and gamma changed to target ball-chasing (2026-10-31) | Run 6 stayed clumped | Run 7: collapsed — see the P0 above it |
 | **Change** | Entropy schedule to recover team spirit's skill loss (2026-10-30) | Run 4 lost mechanical skill | Skill recovered; most of run 4's spacing gain went with it |
 | **Change** | Team spirit added (2026-10-11) | Targets run 3's ball-chasing | Effect far smaller than runs 4/07 implied — see the entropy-schedule entry |
@@ -60,7 +60,7 @@ execution, not just by reading the corrected code.
 
 ---
 
-## P0 — Run 7 (PBT) collapsed back to near-random after 150M — **OPEN (2026-11-07)**
+## P0 — Run 7 (PBT) collapsed back to near-random after 150M — **FIXED in code 2026-11-07, not yet rerun**
 
 Run 7: 4 members, 10 generations, ~270–296M steps each, on the 2026-10-31
 setup (speed-to-ball and face-ball faded to 0, gamma 0.995, team spirit
@@ -94,7 +94,20 @@ drifted up (mean 0.82 → 0.93), but with 30 games per member per generation the
 fitness differences (±0.09 standard error) are noise, so that drift is not
 evidence that higher team spirit wins.
 
-**Fixes to make before another PBT run, none implemented:**
+**Fixed (2026-11-07), not yet verified by a full run:**
+- Speed-to-ball and face-ball floors restored to 50% (run 6's schedule).
+- Team spirit capped at 0.8: starting range 0.5–0.8, and perturbation can't
+  exceed it.
+- Fitness = 0.5 × cross-play win rate + 0.5 × win rate against a fixed reference
+  (`PBT_REFERENCE_CHECKPOINT`). `06_pbt.sh` uses run 6's team-spirit checkpoint
+  from `output_run6` if it's on the volume. Each member's `fitness_vs_reference`
+  is logged in `generations.jsonl`, which also gives an absolute learning curve.
+- `Train_Ground.py` saves once more when a run ends, so a generation no longer
+  throws away the ~3.75M steps since its last periodic save.
+- `exp.sh` caps the benchmark's `N_PROC` at `MAX_N_PROC` (default 32): on a
+  128-core pod it chose so many processes that run 7's restart ran out of RAM.
+
+**Originally proposed:**
 - Restore the speed-to-ball floor (0.5 → 0.25) that run 6 had, which never collapsed.
 - Cap evolved team spirit, e.g. at 0.8, or keep the per-car touch share fixed as tau rises.
 - Add an absolute fitness term against a fixed opponent (e.g. the run 6 policy), so a

@@ -117,10 +117,23 @@ else:
 # so generation 0 had no variety for selection to act on.
 INITIAL_LR_RANGE = (5e-5, 2e-4)
 INITIAL_ENT_COEF_RANGE = (0.005, 0.02)
-# Team spirit is drawn uniformly. Run 6 stayed clumped at 0.8, so the range
-# leans high; 1.0 is full sharing.
-TEAM_SPIRIT_RANGE = (0.6, 1.0)
+# Team spirit is drawn uniformly and capped at 0.8. Run 7 allowed up to 1.0,
+# drifted to ~0.93, and collapsed: at that level a car keeps under a third of
+# the reward for its own touches (docs/ISSUES.md). 0.8 is run 6's value, which
+# held up.
+TEAM_SPIRIT_RANGE = (0.5, 0.8)
+TEAM_SPIRIT_MAX = 0.8
 TEAM_SPIRIT_PERTURB = 0.1
+
+# A fixed opponent every member also plays each generation, so fitness has an
+# absolute part. Win rate against each other is only relative: in run 7 all four
+# members collapsed together, kept winning about half their games, and nothing
+# looked wrong. A trained policy from an earlier run (its checkpoint folder,
+# the one holding PPO_POLICY.pt) is the natural choice; unset means relative
+# fitness only. Its win rates are logged as fitness_vs_reference either way,
+# which is also an absolute learning curve for the population.
+REFERENCE_CHECKPOINT = os.environ.get("PBT_REFERENCE_CHECKPOINT") or None
+REFERENCE_WEIGHT = 0.5
 
 
 def _log_uniform(low: float, high: float) -> float:
@@ -157,6 +170,7 @@ class PopulationMember:
         self.critic_lr = critic_lr
         self.ent_coef = ent_coef
         self.fitness: Optional[float] = None
+        self.fitness_vs_reference: Optional[float] = None
         # Set by exploit_and_explore() the generation before it should
         # take effect; consumed (reset to None) by train_generation().
         self.pending_load_override: Optional[str] = None
@@ -320,6 +334,23 @@ def evaluate_population(population: List[PopulationMember], generation: int) -> 
     print(f"[gen {generation}] cross-play fitness: "
           f"{ {m.member_id: round(m.fitness, 3) for m in population} }")
 
+    if REFERENCE_CHECKPOINT:
+        try:
+            for member in population:
+                member.fitness_vs_reference = evaluate_match(
+                    checkpoints[member.member_id], REFERENCE_CHECKPOINT,
+                    n_episodes=EVAL_EPISODES_PER_MATCHUP,
+                )
+                member.fitness = ((1 - REFERENCE_WEIGHT) * member.fitness
+                                  + REFERENCE_WEIGHT * member.fitness_vs_reference)
+        except Exception as e:
+            print(f"[gen {generation}] reference match failed ({e!r}) -- "
+                  f"using cross-play fitness only this generation.")
+        else:
+            print(f"[gen {generation}] vs reference: "
+                  f"{ {m.member_id: round(m.fitness_vs_reference, 3) for m in population} } "
+                  f"-> fitness { {m.member_id: round(m.fitness, 3) for m in population} }")
+
 
 def _evaluate_population_fallback(population: List[PopulationMember]) -> None:
     """
@@ -358,7 +389,7 @@ def exploit_and_explore(population: List[PopulationMember], generation: int) -> 
         loser.policy_lr = winner.policy_lr * random.uniform(*PERTURB_RANGE)
         loser.critic_lr = winner.critic_lr * random.uniform(*PERTURB_RANGE)
         loser.ent_coef = max(1e-4, winner.ent_coef * random.uniform(*PERTURB_RANGE))
-        loser.team_spirit_final = min(1.0, max(0.0, winner.team_spirit_final
+        loser.team_spirit_final = min(TEAM_SPIRIT_MAX, max(0.0, winner.team_spirit_final
                                                + random.uniform(-TEAM_SPIRIT_PERTURB, TEAM_SPIRIT_PERTURB)))
         print(f"[gen {generation}] member {loser.member_id} (fitness={loser.fitness:.3f}) "
               f"exploits member {winner.member_id} (fitness={winner.fitness:.3f})")
@@ -405,6 +436,7 @@ def log_generation(population: List[PopulationMember], generation: int) -> None:
                 "critic_lr": member.critic_lr,
                 "ent_coef": member.ent_coef,
                 "team_spirit_final": member.team_spirit_final,
+                "fitness_vs_reference": member.fitness_vs_reference,
             }) + "\n")
 
 
@@ -433,6 +465,11 @@ def resume_population() -> Optional[tuple]:
 
 
 def main() -> None:
+    if REFERENCE_CHECKPOINT and not os.path.isfile(os.path.join(REFERENCE_CHECKPOINT, "PPO_POLICY.pt")):
+        raise SystemExit(f"PBT_REFERENCE_CHECKPOINT={REFERENCE_CHECKPOINT!r} has no PPO_POLICY.pt")
+    if not REFERENCE_CHECKPOINT:
+        print("WARNING: no PBT_REFERENCE_CHECKPOINT -- fitness is relative only, so a collapse "
+              "of the whole population won't show up (see docs/ISSUES.md, run 7).")
     resumed = resume_population()
     if resumed is not None:
         population, first_generation = resumed

@@ -359,3 +359,8 @@ if __name__ == "__main__":
     learner = Learner(build_rlgym_v2_env, **learner_kwargs)
     stats_logger.attach(learner)
     learner.learn()
+    # Learner only saves every save_every_ts, never when timestep_limit ends the
+    # loop, so whatever trained since the last save was thrown away -- about 11%
+    # of each PBT generation in run 7. learn() already saves when it crashes.
+    if learner.ts_since_last_save > 0:
+        learner.save(learner.agent.cumulative_timesteps)

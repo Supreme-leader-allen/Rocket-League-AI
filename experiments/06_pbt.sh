@@ -35,9 +35,19 @@ else
     PBT_N_GENERATIONS="${PBT_N_GENERATIONS:-10}"
 fi
 
+# Fixed opponent for the absolute part of fitness (Pbt.py). Defaults to run 6's
+# team spirit policy if it's on this volume; set PBT_REFERENCE_CHECKPOINT to a
+# checkpoint folder to choose another, or to "none" for relative fitness only.
+if [ -z "${PBT_REFERENCE_CHECKPOINT:-}" ]; then
+    PBT_REFERENCE_CHECKPOINT=$(latest_checkpoint_path "$(dirname "$OUT")/output_run6/checkpoints/01_ground" || true)
+fi
+[ "${PBT_REFERENCE_CHECKPOINT:-}" = "none" ] && PBT_REFERENCE_CHECKPOINT=""
+echo "reference opponent: ${PBT_REFERENCE_CHECKPOINT:-NONE (relative fitness only)}"
+
 GENERATION_TIMESTEPS=$(( LIMIT / PBT_N_GENERATIONS ))
 echo "population=$PBT_POPULATION_SIZE  generations=$PBT_N_GENERATIONS  generation_timesteps=$GENERATION_TIMESTEPS  n_proc_per_member=$N_PROC"
 
+PBT_REFERENCE_CHECKPOINT="${PBT_REFERENCE_CHECKPOINT:-}" \
 PBT_OUT_DIR="$OUT" \
 PBT_POPULATION_SIZE="$PBT_POPULATION_SIZE" \
 PBT_N_GENERATIONS="$PBT_N_GENERATIONS" \
