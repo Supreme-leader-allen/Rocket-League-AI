@@ -45,7 +45,7 @@ fi
 echo "reference opponent: ${PBT_REFERENCE_CHECKPOINT:-NONE (relative fitness only)}"
 
 GENERATION_TIMESTEPS=$(( LIMIT / PBT_N_GENERATIONS ))
-echo "population=$PBT_POPULATION_SIZE  generations=$PBT_N_GENERATIONS  generation_timesteps=$GENERATION_TIMESTEPS  n_proc_per_member=$N_PROC"
+echo "population=$PBT_POPULATION_SIZE  generations=$PBT_N_GENERATIONS  generation_timesteps=$GENERATION_TIMESTEPS  n_proc_per_member=$N_PROC  parallel_members=${PBT_PARALLEL_MEMBERS:-1}"
 
 PBT_REFERENCE_CHECKPOINT="${PBT_REFERENCE_CHECKPOINT:-}" \
 PBT_OUT_DIR="$OUT" \
@@ -53,6 +53,7 @@ PBT_POPULATION_SIZE="$PBT_POPULATION_SIZE" \
 PBT_N_GENERATIONS="$PBT_N_GENERATIONS" \
 PBT_GENERATION_TIMESTEPS="$GENERATION_TIMESTEPS" \
 PBT_N_PROC_PER_MEMBER="$N_PROC" \
+PBT_PARALLEL_MEMBERS="${PBT_PARALLEL_MEMBERS:-1}" \
     python Pbt.py 2>&1 | tee "$OUT/logs/06_pbt.log"
 
 echo "06 done -> $OUT/checkpoints/pbt/pbt_member_*, $OUT/metrics/pbt_member_*.csv, $OUT/metrics/pbt/generations.jsonl"

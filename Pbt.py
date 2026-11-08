@@ -81,6 +81,8 @@ POPULATION_SIZE = int(os.environ.get("PBT_POPULATION_SIZE", 4))
 N_GENERATIONS = int(os.environ.get("PBT_N_GENERATIONS", 10))
 GENERATION_TIMESTEPS = int(os.environ.get("PBT_GENERATION_TIMESTEPS", 2_000_000))
 N_PROC_PER_MEMBER = int(os.environ.get("PBT_N_PROC_PER_MEMBER", 8))
+# How many members train at the same time -- see train_generation.
+PARALLEL_MEMBERS = max(1, int(os.environ.get("PBT_PARALLEL_MEMBERS", 1)))
 # 4 was too noisy to rank anything: 12 games per member per generation.
 EVAL_EPISODES_PER_MATCHUP = int(os.environ.get("PBT_EVAL_EPISODES", 10))
 BOTTOM_FRACTION = 0.25  # fraction of the population replaced each generation
@@ -133,6 +135,12 @@ TEAM_SPIRIT_PERTURB = 0.1
 # fitness only. Its win rates are logged as fitness_vs_reference either way,
 # which is also an absolute learning curve for the population.
 REFERENCE_CHECKPOINT = os.environ.get("PBT_REFERENCE_CHECKPOINT") or None
+
+# Per-member console logs when members train in parallel, and the starting
+# population, saved so a restart before generation 0 finishes keeps it
+# instead of drawing new random settings.
+MEMBER_LOG_DIR = os.path.join(PBT_OUT_DIR, "logs") if PBT_OUT_DIR else "logs"
+INITIAL_POPULATION_PATH = os.path.join(os.path.dirname(GENERATION_LOG_PATH), "initial_population.json")
 REFERENCE_WEIGHT = 0.5
 
 
@@ -241,15 +249,8 @@ def find_latest_checkpoint(base_save_folder: str) -> Optional[str]:
     return best_ckpt
 
 
-def train_generation(member: PopulationMember, generation: int) -> None:
-    """
-    Launches Train_Ground.py as a subprocess for this member/generation
-    and blocks until it finishes. Confirmed by reading
-    rlgym_ppo.learner.Learner._learn()'s source: its main loop is a
-    plain `while cumulative_timesteps < timestep_limit`, so it returns
-    on its own once PBT_TIMESTEP_LIMIT is hit -- subprocess.run() here
-    is guaranteed to return without needing an external shutdown signal.
-    """
+def _generation_env(member: PopulationMember, generation: int) -> dict:
+    """Environment for one member's Train_Ground.py run this generation."""
     env = os.environ.copy()
     env["PBT_POLICY_LR"] = str(member.policy_lr)
     env["PBT_CRITIC_LR"] = str(member.critic_lr)
@@ -291,14 +292,49 @@ def train_generation(member: PopulationMember, generation: int) -> None:
           f"ent_coef={member.ent_coef:.4f}, team_spirit={member.team_spirit_final:.2f}, "
           f"warm start: {source}, "
           f"loaded_ts={loaded_ts}, target_ts={loaded_ts + GENERATION_TIMESTEPS})")
+    return env
 
-    result = subprocess.run([sys.executable, "Train_Ground.py"], env=env)
-    member.pending_load_override = None
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"Train_Ground.py subprocess failed for member {member.member_id} "
-            f"(exit code {result.returncode})"
-        )
+
+def train_generation(members: List[PopulationMember], generation: int) -> None:
+    """
+    Trains every member for one generation, PARALLEL_MEMBERS at a time, each
+    as its own Train_Ground.py subprocess. Learner's loop is a plain
+    `while cumulative_timesteps < timestep_limit`, so each returns on its
+    own once PBT_TIMESTEP_LIMIT is hit.
+
+    Running members side by side (added 2026-11-08): one member at a time
+    left ~65% of a 4090 pod's CPU idle, because each run is limited by its
+    single main process (inference and inter-process traffic), not by the
+    game workers. Members don't share anything while training -- own
+    checkpoint lineage, own CSV shards -- so running two at once changes
+    nothing about the results, only wall time. With more than one at a time,
+    each member's console output goes to logs/pbt_member_<id>.log instead
+    of interleaving here.
+    """
+    for start in range(0, len(members), PARALLEL_MEMBERS):
+        batch = members[start:start + PARALLEL_MEMBERS]
+        running = []
+        for member in batch:
+            env = _generation_env(member, generation)
+            if PARALLEL_MEMBERS > 1:
+                os.makedirs(MEMBER_LOG_DIR, exist_ok=True)
+                log = open(os.path.join(MEMBER_LOG_DIR, f"{member.run_label}.log"), "a")
+                proc = subprocess.Popen([sys.executable, "Train_Ground.py"], env=env,
+                                        stdout=log, stderr=subprocess.STDOUT)
+            else:
+                log, proc = None, subprocess.Popen([sys.executable, "Train_Ground.py"], env=env)
+            running.append((member, proc, log))
+
+        failed = []
+        for member, proc, log in running:
+            code = proc.wait()
+            if log is not None:
+                log.close()
+            member.pending_load_override = None
+            if code != 0:
+                failed.append(f"member {member.member_id} (exit code {code})")
+        if failed:
+            raise RuntimeError(f"Train_Ground.py subprocess failed for {', '.join(failed)}")
 
 
 def evaluate_population(population: List[PopulationMember], generation: int) -> None:
@@ -464,6 +500,33 @@ def resume_population() -> Optional[tuple]:
     return population, max(row["generation"] for row in latest.values()) + 1
 
 
+def initial_population() -> List[PopulationMember]:
+    """Random starting settings, saved on first use and reloaded after that."""
+    if os.path.exists(INITIAL_POPULATION_PATH):
+        with open(INITIAL_POPULATION_PATH) as f:
+            rows = json.load(f)
+        if len(rows) == POPULATION_SIZE:
+            print("Reusing the starting population from initial_population.json.")
+            return [PopulationMember(r["member_id"], r["policy_lr"], r["critic_lr"], r["ent_coef"],
+                                     r["team_spirit_final"]) for r in rows]
+    population = [
+        PopulationMember(
+            i,
+            _log_uniform(*INITIAL_LR_RANGE),
+            _log_uniform(*INITIAL_LR_RANGE),
+            _log_uniform(*INITIAL_ENT_COEF_RANGE),
+            random.uniform(*TEAM_SPIRIT_RANGE),
+        )
+        for i in range(POPULATION_SIZE)
+    ]
+    os.makedirs(os.path.dirname(INITIAL_POPULATION_PATH) or ".", exist_ok=True)
+    with open(INITIAL_POPULATION_PATH, "w") as f:
+        json.dump([{"member_id": m.member_id, "policy_lr": m.policy_lr, "critic_lr": m.critic_lr,
+                    "ent_coef": m.ent_coef, "team_spirit_final": m.team_spirit_final}
+                   for m in population], f, indent=1)
+    return population
+
+
 def main() -> None:
     if REFERENCE_CHECKPOINT and not os.path.isfile(os.path.join(REFERENCE_CHECKPOINT, "PPO_POLICY.pt")):
         raise SystemExit(f"PBT_REFERENCE_CHECKPOINT={REFERENCE_CHECKPOINT!r} has no PPO_POLICY.pt")
@@ -478,20 +541,10 @@ def main() -> None:
             exploit_and_explore(population, first_generation - 1)
     else:
         first_generation = 0
-        population = [
-            PopulationMember(
-                i,
-                _log_uniform(*INITIAL_LR_RANGE),
-                _log_uniform(*INITIAL_LR_RANGE),
-                _log_uniform(*INITIAL_ENT_COEF_RANGE),
-                random.uniform(*TEAM_SPIRIT_RANGE),
-            )
-            for i in range(POPULATION_SIZE)
-        ]
+        population = initial_population()
 
     for generation in range(first_generation, N_GENERATIONS):
-        for member in population:
-            train_generation(member, generation)
+        train_generation(population, generation)
 
         evaluate_population(population, generation)
         log_generation(population, generation)
